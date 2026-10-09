@@ -123,6 +123,7 @@ static void pond_param(t_pond* x, t_symbol* s, long argc, t_atom* argv) {
         else if (!std::strcmp(n, "release")) p.release = v;
         else if (!std::strcmp(n, "velamt")) p.velamt = v;
         else if (!std::strcmp(n, "volume")) p.volume = v;
+        else if (!std::strcmp(n, "clarity")) p.clarity = v;
         else if (!std::strcmp(n, "display")) x->displayOn = v != 0.f;
         else { object_error((t_object*)x, "unknown message %s", n); return; }
     }
@@ -246,7 +247,7 @@ static void pond_free(t_pond* x) {
 static const char* kParams[] = {
     "corners", "walls", "visc", "refl", "current", "cmode", "cdir", "start", "nstones",
     "speed", "keytrack", "freeze", "ox", "oy", "osize", "wander", "width", "detune", "drift",
-    "attack", "release", "velamt", "volume", "display",
+    "attack", "release", "velamt", "volume", "clarity", "display",
     "s1x", "s1y", "s1h", "s1s", "s1m", "s2x", "s2y", "s2h", "s2s", "s2m",
     "s3x", "s3y", "s3h", "s3s", "s3m", "s4x", "s4y", "s4h", "s4s", "s4m",
 };

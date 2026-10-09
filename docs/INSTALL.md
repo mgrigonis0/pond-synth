@@ -72,7 +72,8 @@ Pads: **Shape** (x = corners, y = walls bent in ↔ bulging) and **Medium**
 
 **Swirl / Flow** (under the pond) picks the current type.
 
-Knobs: Start, Speed, Key (pond speed follows the note), Freeze, Wander, Width, Detune,
+Knobs: Start, Speed, Key (pond speed follows the note), Freeze, **Clarity** (0% = alive,
+shimmering; 100% = clean, steady pitch even at high Speed), Wander, Width, Detune,
 Drift, Attack, Release, Velocity, Volume. **Randomize** gives fresh stones; **View** turns
 the moving water display on and off.
 

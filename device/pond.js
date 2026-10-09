@@ -23,7 +23,7 @@ mgraphics.autofill = 0;
 var T = 0.55;                // tilt (vertical squash)
 var MAXST = 4;
 var P = {
-    corners: 5, walls: 0.2, visc: 0.25, refl: 0.8, current: 0.25, cmode: 0, cdir: 0,
+    corners: 5, walls: 0.2, visc: 0.25, refl: 1, current: 0.25, cmode: 0, cdir: 0,
     ox: 0.12, oy: -0.1, osize: 0.4, width: 0.5, nstones: 3, display: 1
 };
 var stones = [

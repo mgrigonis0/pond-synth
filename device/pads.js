@@ -9,7 +9,7 @@ mgraphics.init();
 mgraphics.relative_coords = 0;
 mgraphics.autofill = 0;
 
-var P = { corners: 5, walls: 0.2, visc: 0.25, refl: 0.8 };
+var P = { corners: 5, walls: 0.2, visc: 0.25, refl: 1 };
 var active = -1;
 
 function layout() {

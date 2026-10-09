@@ -65,6 +65,7 @@ def valueof(longname, short, ptype, lo, hi, init, unitstyle=1, exponent=1.0, uni
 DIALS = [
     ("start", "Start", "Start", 0, 0.0, 4.0, 0.0, 9, 1.0, "%.2f s"),
     ("speed", "Pond Speed", "Speed", 0, 0.1, 4.0, 1.0, 9, 2.0, "%.2fx"),
+    ("clarity", "Clarity", "Clarity", 0, 0.0, 100.0, 0.0, 5, 1.0, None),
     ("wander", "Wander", "Wander", 0, 0.0, 100.0, 0.0, 5, 1.0, None),
     ("width", "Width", "Width", 0, 0.0, 100.0, 50.0, 5, 1.0, None),
     ("detune", "Detune", "Detune", 0, 0.0, 30.0, 6.0, 9, 1.0, "%.1f ct"),
@@ -86,7 +87,7 @@ HIDDEN = [  # set by pond.js / pads.js gestures, stored + automatable in Live
     ("corners", "Corners", "Corners", 0, 3.0, 12.0, 5.0),
     ("walls", "Walls", "Walls", 0, -1.0, 1.0, 0.2),
     ("visc", "Viscosity", "Visc", 0, 0.0, 1.0, 0.25),
-    ("refl", "Reflect", "Reflect", 0, 0.0, 1.0, 0.8),
+    ("refl", "Reflect", "Reflect", 0, 0.0, 1.0, 1.0),
     ("current", "Current", "Current", 0, -1.0, 1.0, 0.25),
     ("cdir", "Flow Direction", "Flow Dir", 0, -3.1416, 3.1416, 0.0),
     ("ox", "Orbit X", "Orbit X", 0, -1.0, 1.0, 0.12),
@@ -153,10 +154,10 @@ def bus_out(name, src, x, y, init_bang=True, scale=None):
 
 
 # visible dials: time block + 4x2 knob grid
-pres_pos = {"start": (412, 18), "speed": (458, 18)}
+pres_pos = {"start": (412, 18), "speed": (458, 18), "clarity": (504, 18)}
 grid = ["wander", "width", "detune", "drift", "attack", "release", "velamt", "volume"]
 for k, n in enumerate(grid):
-    pres_pos[n] = (512 + (k % 4) * 48, 6 + (k // 4) * 80)
+    pres_pos[n] = (558 + (k % 4) * 48, 6 + (k // 4) * 80)
 for k, (name, longn, short, ptype, lo, hi, init, ustyle, expo, units) in enumerate(DIALS):
     px, py = pres_pos[name]
     d = box("live.dial", (700 + (k % 5) * 90, 80 + (k // 5) * 90, 44, 48), ins=1, outs=2, outtypes=["", "float"],
@@ -195,7 +196,7 @@ for k, name in enumerate(hidden_names):
 for txt, rect in (("Time", (412, 4, 60, 14)), ("Orbit", (512, 70, 60, 14)), ("Envelope", (512, 150, 80, 14))):
     pass  # kept minimal: knob names come from the Live parameter short names
 
-DEVICE_W = 512 + 4 * 48 + 6
+DEVICE_W = 558 + 4 * 48 + 6
 
 patcher = {
     "patcher": {

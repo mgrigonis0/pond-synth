@@ -51,7 +51,7 @@ struct Stone {
 
 struct Params {
     // pond
-    std::atomic<float> corners{5.f}, walls{0.2f}, visc{0.25f}, refl{0.8f}, current{0.25f};
+    std::atomic<float> corners{5.f}, walls{0.2f}, visc{0.25f}, refl{1.f}, current{0.25f};
     std::atomic<int> cmode{0};            // 0 = whirlpool, 1 = flow (one direction to another)
     std::atomic<float> cdir{0.f};         // flow direction, radians (0 = towards +x)
     // time
@@ -62,6 +62,7 @@ struct Params {
     std::atomic<float> wander{0.f}, width{0.5f}, detune{6.f}, drift{0.2f};
     // playing
     std::atomic<float> attack{8.f}, release{400.f}, velamt{0.7f}, volume{-6.f};
+    std::atomic<float> clarity{0.f};      // 0 = continuous (alive), 1 = water held per wave cycle (clean)
 };
 
 // --------------------------------------------------------------------------
@@ -128,7 +129,7 @@ inline void buildShape(float corners, float walls, float refl, float visc, Shape
     const float cell = 2.f / G;
     // absorbing walls: friction on the water's motion in a wide band along the wall.
     // Reflect 1 = no friction (hard wall); 0 = strong friction that soaks waves up.
-    const float absorb = std::pow(1.f - std::clamp(refl, 0.f, 1.f), 1.5f) * SPONGE_MAX;
+    const float absorb = std::pow(1.f - std::clamp(refl, 0.f, 1.f), 2.5f) * SPONGE_MAX;
     for (int gy = 0; gy < G; gy++) {
         for (int gx = 0; gx < G; gx++) {
             int i = gy * G + gx;
@@ -154,6 +155,9 @@ inline void buildShape(float corners, float walls, float refl, float visc, Shape
     // third so the far end behaves like a near-solid: ripples barely spread and die fast.
     const float vv = std::clamp(visc, 0.f, 1.f);
     s.viscCoef = 0.002f * std::pow(65.f, vv);
+    // Stability of the scheme needs 16*visc + 2*friction < 2.4 (fastest grid mode);
+    // keep a margin so near-solid + absorbing walls can never run away.
+    s.viscCoef = std::min(s.viscCoef, (2.0f - 2.f * absorb) / 16.f);
     float t = std::clamp((vv - 0.6f) / 0.4f, 0.f, 1.f); t = t * t * (3 - 2 * t);
     const float drag = (float)std::pow(1.0 - 0.995 * t, 1.0 / STEPS_PER_POND_SEC);   // up to 99.5% loss per pond-second
     for (int i = 0; i < NCELLS; i++) s.damp[i] *= drag;
@@ -352,6 +356,17 @@ struct Wobble {
 };
 
 // --------------------------------------------------------------------------
+struct Biquad {
+    float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    void highpass(double fc, double q, double sr) {
+        double w = 2 * kPi * fc / sr, cw = std::cos(w), al = std::sin(w) / (2 * q), a0 = 1 + al;
+        b0 = (float)((1 + cw) / 2 / a0); b1 = (float)(-(1 + cw) / a0); b2 = b0;
+        a1 = (float)(-2 * cw / a0); a2 = (float)((1 - al) / a0); x1 = x2 = y1 = y2 = 0;
+    }
+    float run(float x) { float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2; x2 = x1; x1 = x; y2 = y1; y1 = y; return y; }
+};
+constexpr double BW4_Q1 = 0.5411961, BW4_Q2 = 1.3065630;   // 4th-order Butterworth sections
+
 struct Voice {
     Water w;
     bool active = false, gate = false;
@@ -366,8 +381,12 @@ struct Voice {
     double dph[2] = {0, 0}; float rrf[2] = {1, 1};
     bool stealing = false, pendOff = false; uint8_t pendNote = 0, pendVel = 0;
     // per-ear high-pass just below the note: removes the slosh/thump "boom" under the pitch
-    float hb0 = 1, hb1 = 0, hb2 = 0, ha1 = 0, ha2 = 0;
-    float hx1[2] = {0, 0}, hx2[2] = {0, 0}, hy1[2] = {0, 0}, hy2[2] = {0, 0};
+    Biquad hp[2][2];               // [stage][ear]: 4th-order Butterworth high-pass under the note
+    // Clarity: per-lap snapshots of the waveform along the orbit
+    static constexpr int TAB = 128;
+    float tabOld[2][TAB + 1] = {}, tabNew[2][TAB + 1] = {};
+    bool tabInit = false;
+    int lapCount[2] = {0, 0}, holdLaps[2] = {1, 1};
     int firPos = 0;
     Wobble wobP[2], wobR[2];
 };
@@ -497,6 +516,7 @@ public:
         const float detune = std::clamp(prm.detune.load(), 0.f, 50.f);
         const float drift = std::clamp(prm.drift.load(), 0.f, 1.f);
         const float wander = std::clamp(prm.wander.load(), 0.f, 1.f);
+        const float clarity = std::clamp(prm.clarity.load(), 0.f, 1.f);
 
         // orbit centre with wander, kept inside the pond
         float ox = std::clamp(prm.ox.load(), -0.95f, 0.95f), oy = std::clamp(prm.oy.load(), -0.95f, 0.95f);
@@ -575,16 +595,47 @@ public:
                 for (int ear = 0; ear < 2; ear++) {
                     float* buf = v.firBuf[ear];
                     int wpos = v.firPos;
-                    for (int k = 0; k < OS; k++) {
-                        v.phase[ear] += v.dph[ear]; if (v.phase[ear] >= 1.0) v.phase[ear] -= 1.0;
-                        float sn, cs; sincos01((float)v.phase[ear], sn, cs);
-                        const float rr = rGs * v.rrf[ear];
+                    const float rr = rGs * v.rrf[ear];
+                    // water height on this ear's orbit at phase ph (0..1)
+                    auto sample = [&](float ph) {
+                        float sn, cs; sincos01(ph, sn, cs);
                         float gx = cG[ear][0] + rr * cs, gy = cG[ear][1] + rr * sn;
                         if (pk != 0.f) {
                             if (swirl) { float px = gx - gc, py = gy - gc; gx = gc + prc * px + prs * py; gy = gc - prs * px + prc * py; }
                             else { gx += pdx; gy += pdy; }
                         }
-                        float h = bilinear(Pf, gx, gy) * (1.f - blend) + bilinear(Uf, gx, gy) * blend;
+                        return bilinear(Pf, gx, gy) * (1.f - blend) + bilinear(Uf, gx, gy) * blend;
+                    };
+                    auto capture = [&](float* t) { for (int i = 0; i < Voice::TAB; i++) t[i] = sample((float)i / Voice::TAB); t[Voice::TAB] = t[0]; };
+                    if (clarity > 0.f && !v.tabInit) {
+                        capture(v.tabNew[ear]); std::memcpy(v.tabOld[ear], v.tabNew[ear], sizeof(v.tabOld[ear]));
+                        v.lapCount[ear] = 0; v.holdLaps[ear] = 1;
+                        if (ear == 1) v.tabInit = true;
+                    }
+                    for (int k = 0; k < OS; k++) {
+                        v.phase[ear] += v.dph[ear];
+                        if (v.phase[ear] >= 1.0) {
+                            v.phase[ear] -= 1.0;
+                            if (clarity > 0.f && ++v.lapCount[ear] >= v.holdLaps[ear]) {
+                                // next snapshot: the waveform glides old -> new over holdLaps cycles.
+                                // Clarity sets how often it refreshes: ~60/s (low) down to ~10/s (full)
+                                std::memcpy(v.tabOld[ear], v.tabNew[ear], sizeof(v.tabOld[ear]));
+                                capture(v.tabNew[ear]);
+                                const float rate = 60.f * std::pow(10.f / 60.f, clarity);
+                                v.lapCount[ear] = 0;
+                                v.holdLaps[ear] = std::max(1, (int)std::lround(f0 / rate));
+                            }
+                        }
+                        const float ph = (float)v.phase[ear];
+                        float h = clarity < 1.f ? sample(ph) : 0.f;
+                        if (clarity > 0.f) {
+                            // glide from last lap's snapshot to this lap's across the cycle: pitch stays clean
+                            float x = ph * Voice::TAB; int i = (int)x; float f = x - i;
+                            float a = v.tabOld[ear][i] + (v.tabOld[ear][i + 1] - v.tabOld[ear][i]) * f;
+                            float b = v.tabNew[ear][i] + (v.tabNew[ear][i + 1] - v.tabNew[ear][i]) * f;
+                            const float wgt = ((float)v.lapCount[ear] + ph) / (float)v.holdLaps[ear];
+                            h = h * (1.f - clarity) + (a + (b - a) * wgt) * clarity;
+                        }
                         buf[wpos] = h; buf[wpos + FIR_TAPS] = h;
                         if (++wpos == FIR_TAPS) wpos = 0;
                     }
@@ -596,8 +647,7 @@ public:
                         a2 += fir[t + 2] * win[t + 2]; a3 += fir[t + 3] * win[t + 3];
                     }
                     const float xin = (a0 + a1) + (a2 + a3);
-                    const float yo = v.hb0 * xin + v.hb1 * v.hx1[ear] + v.hb2 * v.hx2[ear] - v.ha1 * v.hy1[ear] - v.ha2 * v.hy2[ear];
-                    v.hx2[ear] = v.hx1[ear]; v.hx1[ear] = xin; v.hy2[ear] = v.hy1[ear]; v.hy1[ear] = yo;
+                    const float yo = v.hp[1][ear].run(v.hp[0][ear].run(xin));
                     y[ear] = yo;
                 }
                 v.firPos = (v.firPos + OS) % FIR_TAPS;
@@ -606,14 +656,15 @@ public:
                 outR[s] += y[1] * g;
             }
         }
-        // DC block + soft clip
-        for (int s = 0; s < n; s++) {
-            float l = outL[s], r = outR[s];
-            float hl = l - dcX[0] + dcR * dcY[0]; dcX[0] = l; dcY[0] = hl;
-            float hr = r - dcX[1] + dcR * dcY[1]; dcX[1] = r; dcY[1] = hr;
-            outL[s] = std::tanh(hl); outR[s] = std::tanh(hr);
+        // steep 35 Hz high-pass (4th order) + soft clip
+        if (sr != outHpSr) {
+            for (int c = 0; c < 2; c++) { outHp[0][c].highpass(35.0, BW4_Q1, sr); outHp[1][c].highpass(35.0, BW4_Q2, sr); }
+            outHpSr = sr;
         }
-        dcR = 1.f - (float)(2 * kPi * 20.0 / sr);
+        for (int s = 0; s < n; s++) {
+            outL[s] = std::tanh(outHp[1][0].run(outHp[0][0].run(outL[s])));
+            outR[s] = std::tanh(outHp[1][1].run(outHp[0][1].run(outR[s])));
+        }
         clock += (uint64_t)n;
         updateDisplay(newest, nActive, n, sr);
     }
@@ -638,7 +689,7 @@ private:
     EventQueue<256> queue;
     Voice voices[MAX_VOICES];
     float fir[FIR_TAPS] = {};
-    float dcX[2] = {}, dcY[2] = {}, dcR = 0.997f;
+    Biquad outHp[2][2]; double outHpSr = 0;
     Wobble wanX, wanY; float wx = 0, wy = 0;
     float sm[4] = {0, 0, 0.3f, 0.04f}; bool orbInit = false;
     AdvectTable advTable;
@@ -759,15 +810,12 @@ private:
         v.active = true; v.gate = !v.pendOff; v.pendOff = false; v.stealing = false; v.note = note; v.vel = vel / 127.f;
         v.env = 0.f; v.phase[0] = v.phase[1] = 0.0; v.startedAt = clock + 1;
         std::memset(v.firBuf, 0, sizeof(v.firBuf)); v.firPos = 0;
-        // 2nd-order Butterworth high-pass at 0.6 x the fundamental
+        // 4th-order Butterworth high-pass at 0.7 x the fundamental: cuts slosh/thump/rumble cleanly
         {
-            double f0 = 440.0 * std::pow(2.0, (note - 69) / 12.0), fc = std::max(15.0, 0.6 * f0);
-            double w = 2 * kPi * fc / curSr, cw = std::cos(w), al = std::sin(w) / (2 * 0.7071);
-            double a0 = 1 + al;
-            v.hb0 = (float)((1 + cw) / 2 / a0); v.hb1 = (float)(-(1 + cw) / a0); v.hb2 = v.hb0;
-            v.ha1 = (float)(-2 * cw / a0); v.ha2 = (float)((1 - al) / a0);
-            for (int e = 0; e < 2; e++) v.hx1[e] = v.hx2[e] = v.hy1[e] = v.hy2[e] = 0.f;
+            double f0 = 440.0 * std::pow(2.0, (note - 69) / 12.0), fc = std::max(20.0, 0.7 * f0);
+            for (int e = 0; e < 2; e++) { v.hp[0][e].highpass(fc, BW4_Q1, curSr); v.hp[1][e].highpass(fc, BW4_Q2, curSr); }
         }
+        v.tabInit = false;
     }
 
     void updateDisplay(int newest, int nActive, int n, double sr) {

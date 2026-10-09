@@ -188,4 +188,11 @@ From the first test in Live 11 / Max 8.6.4 on the Intel Mac:
 - **CPU:** Speed × key tracking capped at 4×.
 - Percentage knobs display 0–100%.
 
+Second round (same day):
+
+- **Clarity knob:** blends the live reading with a snapshot of the water that refreshes ~60×/s (low) down to ~10×/s (full) and glides between snapshots. At Speed 3, lap-to-lap similarity goes 0.05 → 1.00.
+- **Hard feedback at near-solid:** viscosity is now capped together with wall absorption so the simulation can't blow up.
+- **Brightness restored:** Reflect defaults to 100% and absorption is gentler at middle settings.
+- **Rumble:** each voice high-passes at 0.7 × its note (4th order), plus a 35 Hz 4th-order cut on the output.
+
 Still open: loops (pond-life strip with start flag, loop brackets, one-shot / forward / back-and-forth).
