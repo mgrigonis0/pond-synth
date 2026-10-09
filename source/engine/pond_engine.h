@@ -138,7 +138,14 @@ inline void buildShape(float corners, float walls, float refl, float visc, Shape
             s.damp[i] = d0 * (1.f - loss * band * band);
         }
     }
-    s.viscCoef = 0.002f + std::clamp(visc, 0.f, 1.f) * 0.03f;
+    // Viscosity: water (0.002) .. 0.13 (the leapfrog scheme goes unstable above 0.15),
+    // exponential so the whole knob is usable, plus a drag on all motion over the top
+    // third so the far end behaves like a near-solid: ripples barely spread and die fast.
+    const float vv = std::clamp(visc, 0.f, 1.f);
+    s.viscCoef = 0.002f * std::pow(65.f, vv);
+    float t = std::clamp((vv - 0.6f) / 0.4f, 0.f, 1.f); t = t * t * (3 - 2 * t);
+    const float drag = (float)std::pow(1.0 - 0.995 * t, 1.0 / STEPS_PER_POND_SEC);   // up to 99.5% loss per pond-second
+    for (int i = 0; i < NCELLS; i++) s.damp[i] *= drag;
 }
 
 // Distance from a world point to the nearest boundary sample.
@@ -190,24 +197,47 @@ struct Water {
 
     void clear() {
         std::fill(u.begin(), u.end(), 0.f); std::fill(p.begin(), p.end(), 0.f);
-        std::fill(lp.begin(), lp.end(), 0.f);
+        std::fill(lp.begin(), lp.end(), 0.f); npend = 0;
     }
-    void copyFrom(const Water& o) { u = o.u; p = o.p; lp = o.lp; }
+    void copyFrom(const Water& o) {
+        u = o.u; p = o.p; lp = o.lp; npend = o.npend;
+        for (int i = 0; i < o.npend; i++) pend[i] = o.pend[i];
+        advectCount = o.advectCount;
+    }
 
     int advectCount = 0;
+
+    // Stones land over DROP_STEPS pond steps (raised-cosine), not in one step: an
+    // instant height jump under the orbit is heard as a click.
+    static constexpr int DROP_STEPS = 12;
+    struct Pending { Stone s; int k = 0; };
+    Pending pend[8]; int npend = 0;
+    void startDrop(const Stone& st) { if (npend < 8) { pend[npend].s = st; pend[npend].k = 0; npend++; } }
+    void applyPending(const float* mask) {
+        static const auto W = [] {
+            std::array<float, DROP_STEPS> w{}; double sum = 0;
+            for (int k = 0; k < DROP_STEPS; k++) { w[k] = (float)(1 - std::cos(2 * kPi * (k + 0.5) / DROP_STEPS)); sum += w[k]; }
+            for (auto& x : w) x = (float)(x / sum);
+            return w;
+        }();
+        for (int i = 0; i < npend;) {
+            drop(pend[i].s, mask, W[pend[i].k]);
+            if (++pend[i].k >= DROP_STEPS) pend[i] = pend[--npend]; else i++;
+        }
+    }
 
     // adv: precomputed whirlpool rotation (applied every ADVECT_EVERY steps), or null.
     void step(const float* mask, const float* damp, float visc, const struct AdvectTable* adv);
     void advect(std::vector<float>& f, const AdvectTable& t);
 
-    void drop(const Stone& s, const float* mask) {
+    void drop(const Stone& s, const float* mask, float scale = 1.f) {
         // physics: fall time from height, strength = mass * impact speed
         float H = 0.2f + s.h * 2.8f;
         const float g = 4.2f;                                  // scaled gravity: 3 m lands at ~1.2 s
         float v = std::sqrt(2.f * g * H);
         float E = (0.2f + s.mass * 2.8f) * v;
         float sigma = 0.8f + std::pow(std::clamp(s.size, 0.f, 1.f), 1.5f) * 11.f;   // cells
-        float amp = 0.6f * E * std::sqrt(1.7f / sigma);
+        float amp = 0.6f * E * std::sqrt(1.7f / sigma) * scale;
         float cx = worldToGrid(s.x), cy = worldToGrid(s.y);
         int rad = (int)std::ceil(sigma * 3.5f);
         int x0 = std::max(1, (int)cx - rad), x1 = std::min(G - 2, (int)cx + rad);
@@ -222,6 +252,7 @@ struct Water {
 };
 
 inline void Water::step(const float* mask, const float* damp, float visc, const AdvectTable* adv) {
+    if (npend) applyPending(mask);
     float* U = u.data(); float* P = p.data(); float* L = lp.data();
     for (int y = 1; y < G - 1; y++) {
         int r = y * G;
@@ -311,7 +342,8 @@ struct Voice {
     uint64_t startedAt = 0;
     bool landed[MAX_STONES] = {};
     float firBuf[2][2 * FIR_TAPS] = {};
-    double dph[2] = {0, 0}; float rr[2] = {0, 0};
+    double dph[2] = {0, 0}; float rrf[2] = {1, 1};
+    bool stealing = false, pendOff = false; uint8_t pendNote = 0, pendVel = 0;
     int firPos = 0;
     Wobble wobP[2], wobR[2];
 };
@@ -391,7 +423,7 @@ public:
         for (long k = 0; k <= steps; k++) {
             double t = k / STEPS_PER_POND_SEC;
             for (int i = 0; i < n; i++)
-                if (!landed[i] && t >= lt[i]) { landed[i] = true; bake.drop(st[i], s.mask.data()); }
+                if (!landed[i] && t >= lt[i]) { landed[i] = true; bake.startDrop(st[i]); }
             if (k < steps) bake.step(s.mask.data(), s.damp.data(), s.viscCoef, &adv);
         }
         std::lock_guard<std::mutex> lk(shareLock);
@@ -426,6 +458,7 @@ public:
         const float atkS = std::max(0.001f, prm.attack.load() / 1000.f);
         const float relK = std::exp(-1.f / (relS * 0.25f * (float)sr));   // ~-35 dB at the release time
         const float atkInc = 1.f / (atkS * (float)sr);
+        const float stealK = std::exp(-1.f / (0.0008f * (float)sr));      // ~4 ms fade to -55 dB
         const float volG = std::pow(10.f, prm.volume.load() / 20.f);
         const float velAmt = std::clamp(prm.velamt.load(), 0.f, 1.f);
         const bool frozen = prm.freeze.load() != 0;
@@ -447,9 +480,13 @@ public:
         float cap = std::max(0.04f, wallDistance(local.shape.R, cx, cy) - width - 0.05f);
         float rad = 0.04f + std::clamp(prm.osize.load(), 0.f, 1.f) * (cap - 0.04f);
         orbitX.store(cx, std::memory_order_relaxed); orbitY.store(cy, std::memory_order_relaxed); orbitR.store(rad, std::memory_order_relaxed);
-        const float rG = rad * 0.5f * G;                         // radius in cells
-        const float cG[2][2] = {{worldToGrid(cx - width), worldToGrid(cy)}, {worldToGrid(cx + width), worldToGrid(cy)}};
-
+        // one-pole glide (~15 ms) toward the targets, ramped linearly across this block
+        if (!orbInit) { sm[0] = cx; sm[1] = cy; sm[2] = rad; sm[3] = width; orbInit = true; }
+        const float tg[4] = {cx, cy, rad, width};
+        const float ga = 1.f - std::exp(-(float)n / (0.015f * (float)sr));
+        float o0[4], o1[4];
+        for (int k = 0; k < 4; k++) { o0[k] = sm[k]; sm[k] += (tg[k] - sm[k]) * ga; o1[k] = sm[k]; }
+        const float invN = 1.f / (float)n;
         std::fill(outL, outL + n, 0.f);
         std::fill(outR, outR + n, 0.f);
         const float* mask = maskCur.data();
@@ -468,7 +505,10 @@ public:
             const float velG = (1.f - velAmt) + velAmt * v.vel;
             for (int s = 0; s < n; s++) {
                 // envelope
-                if (v.gate) { v.env = std::min(1.f, v.env + atkInc); }
+                if (v.stealing) {
+                    v.env *= stealK;
+                    if (v.env < 1e-3f) { startVoice(v, v.pendNote, v.pendVel); break; }   // new note starts next block
+                } else if (v.gate) { v.env = std::min(1.f, v.env + atkInc); }
                 else { v.env *= relK; if (v.env < 1e-4f) { v.active = false; v.env = 0.f; break; } }
                 // advance the water
                 v.stepAcc += stepsPerSample;
@@ -477,7 +517,7 @@ public:
                     v.w.step(mask, damp, viscC, &advTable);
                     v.pondTime += 1.0 / STEPS_PER_POND_SEC;
                     for (int i = 0; i < local.nStones; i++)
-                        if (!v.landed[i] && v.pondTime >= local.land[i]) { v.landed[i] = true; v.w.drop(local.stones[i], mask); }
+                        if (!v.landed[i] && v.pondTime >= local.land[i]) { v.landed[i] = true; v.w.startDrop(local.stones[i]); }
                 }
                 const float blend = (float)v.stepAcc;
                 // read both ears, 4x oversampled
@@ -485,18 +525,28 @@ public:
                     for (int ear = 0; ear < 2; ear++) {
                         float cents = (ear == 0 ? -0.5f : 0.5f) * detune + drift * 6.f * v.wobP[ear].tick(0.4f, (float)sr / 16.f);
                         v.dph[ear] = f0 * std::pow(2.f, cents / 1200.f) / (sr * OS);
-                        v.rr[ear] = rG * (1.f + drift * 0.04f * v.wobR[ear].tick(0.25f, (float)sr / 16.f));
+                        v.rrf[ear] = 1.f + drift * 0.04f * v.wobR[ear].tick(0.25f, (float)sr / 16.f);
                     }
                 }
                 float y[2];
                 const float* Pf = v.w.p.data(); const float* Uf = v.w.u.data();
+                const float tt = (s + 1) * invN;
+                const float scx = o0[0] + (o1[0] - o0[0]) * tt, scy = o0[1] + (o1[1] - o0[1]) * tt;
+                const float srad = o0[2] + (o1[2] - o0[2]) * tt, swid = o0[3] + (o1[3] - o0[3]) * tt;
+                const float rGs = srad * 0.5f * G;
+                // the water only turns every ADVECT_EVERY steps; read where it WOULD be
+                const float th = ((float)v.w.advectCount + blend) * omega;
+                const float rc = std::cos(th), rs = std::sin(th), gc = (G - 1) * 0.5f;
+                const float cG[2][2] = {{worldToGrid(scx - swid), worldToGrid(scy)}, {worldToGrid(scx + swid), worldToGrid(scy)}};
                 for (int ear = 0; ear < 2; ear++) {
                     float* buf = v.firBuf[ear];
                     int wpos = v.firPos;
                     for (int k = 0; k < OS; k++) {
                         v.phase[ear] += v.dph[ear]; if (v.phase[ear] >= 1.0) v.phase[ear] -= 1.0;
                         float sn, cs; sincos01((float)v.phase[ear], sn, cs);
-                        float gx = cG[ear][0] + v.rr[ear] * cs, gy = cG[ear][1] + v.rr[ear] * sn;
+                        const float rr = rGs * v.rrf[ear];
+                        float px = cG[ear][0] + rr * cs - gc, py = cG[ear][1] + rr * sn - gc;
+                        float gx = gc + rc * px + rs * py, gy = gc - rs * px + rc * py;
                         float h = bilinear(Pf, gx, gy) * (1.f - blend) + bilinear(Uf, gx, gy) * blend;
                         buf[wpos] = h; buf[wpos + FIR_TAPS] = h;
                         if (++wpos == FIR_TAPS) wpos = 0;
@@ -550,6 +600,7 @@ private:
     float fir[FIR_TAPS] = {};
     float dcX[2] = {}, dcY[2] = {}, dcR = 0.997f;
     Wobble wanX, wanY; float wx = 0, wy = 0;
+    float sm[4] = {0, 0, 0.3f, 0.04f}; bool orbInit = false;
     AdvectTable advTable;
     uint64_t clock = 0;
 
@@ -606,22 +657,34 @@ private:
     void handle(const Event& e, double sr) {
         if (e.type == EvType::AllOff) { for (auto& v : voices) v.gate = false; return; }
         if (e.type == EvType::NoteOff) {
-            for (auto& v : voices) if (v.active && v.gate && v.note == e.note) v.gate = false;
+            for (auto& v : voices) {
+                if (v.active && v.gate && v.note == e.note) v.gate = false;
+                if (v.active && v.stealing && v.pendNote == e.note) v.pendOff = true;
+            }
             return;
         }
-        // note on: free voice, else the oldest
+        // note on: free voice, else the oldest (which fades out first: an instant cut clicks)
         int pick = -1; uint64_t oldest = ~0ull;
         for (int i = 0; i < MAX_VOICES; i++) if (!voices[i].active) { pick = i; break; }
         if (pick < 0) for (int i = 0; i < MAX_VOICES; i++) if (voices[i].startedAt < oldest) { oldest = voices[i].startedAt; pick = i; }
         Voice& v = voices[pick];
+        if (v.active && v.env > 1e-3f) {
+            v.stealing = true; v.pendNote = e.note; v.pendVel = e.vel; v.gate = false;
+            v.startedAt = clock + 1;   // counts as newest so it isn't picked again right away
+            return;
+        }
+        startVoice(v, e.note, e.vel);
+        (void)sr;
+    }
+
+    void startVoice(Voice& v, uint8_t note, uint8_t vel) {
         v.w.copyFrom(local.snap);
         v.pondTime = local.snapTime;
         v.stepAcc = 0.0;
         for (int i = 0; i < MAX_STONES; i++) v.landed[i] = (i < local.nStones) && (local.land[i] <= local.snapTime);
-        v.active = true; v.gate = true; v.note = e.note; v.vel = e.vel / 127.f;
+        v.active = true; v.gate = !v.pendOff; v.pendOff = false; v.stealing = false; v.note = note; v.vel = vel / 127.f;
         v.env = 0.f; v.phase[0] = v.phase[1] = 0.0; v.startedAt = clock + 1;
         std::memset(v.firBuf, 0, sizeof(v.firBuf)); v.firPos = 0;
-        (void)sr;
     }
 
     void updateDisplay(int newest, int nActive, int n, double sr) {

@@ -19,7 +19,7 @@ function layout() {
 }
 function clamp(a, lo, hi) { return a < lo ? lo : (a > hi ? hi : a); }
 function wallName(w) { return w < -0.5 ? "concave" : w < -0.15 ? "bent in" : w < 0.15 ? "straight" : w < 0.6 ? "soft bulge" : "bulging"; }
-function viscName(v) { return v < 0.25 ? "water" : v < 0.5 ? "thin oil" : v < 0.75 ? "oil" : "syrup"; }
+function viscName(v) { return v < 0.25 ? "water" : v < 0.5 ? "oil" : v < 0.7 ? "syrup" : v < 0.9 ? "jelly" : "near solid"; }
 
 function text(s, x, y, size, r, g, b) {
     mgraphics.set_source_rgba(r, g, b, 1);
@@ -80,7 +80,7 @@ function paint() {
     text("absorb", L.x1 + 3, L.y + p - 4, 8, 0.6, 0.63, 0.65);
     puck(L.x1 + v * p, L.y + (1 - P.refl) * p);
     text("water", L.x1, L.y + p + 10, 8, 0.6, 0.63, 0.65);
-    text("syrup", L.x1 + p - 24, L.y + p + 10, 8, 0.6, 0.63, 0.65);
+    text("solid", L.x1 + p - 22, L.y + p + 10, 8, 0.6, 0.63, 0.65);
 }
 
 function apply(x, y) {

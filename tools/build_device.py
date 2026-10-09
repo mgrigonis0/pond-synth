@@ -65,13 +65,13 @@ def valueof(longname, short, ptype, lo, hi, init, unitstyle=1, exponent=1.0, uni
 DIALS = [
     ("start", "Start", "Start", 0, 0.0, 4.0, 0.0, 9, 1.0, "%.2f s"),
     ("speed", "Pond Speed", "Speed", 0, 0.1, 4.0, 1.0, 9, 2.0, "%.2fx"),
-    ("wander", "Wander", "Wander", 0, 0.0, 1.0, 0.0, 5, 1.0, None),
-    ("width", "Width", "Width", 0, 0.0, 1.0, 0.5, 5, 1.0, None),
+    ("wander", "Wander", "Wander", 0, 0.0, 100.0, 0.0, 5, 1.0, None),
+    ("width", "Width", "Width", 0, 0.0, 100.0, 50.0, 5, 1.0, None),
     ("detune", "Detune", "Detune", 0, 0.0, 30.0, 6.0, 9, 1.0, "%.1f ct"),
-    ("drift", "Drift", "Drift", 0, 0.0, 1.0, 0.2, 5, 1.0, None),
+    ("drift", "Drift", "Drift", 0, 0.0, 100.0, 20.0, 5, 1.0, None),
     ("attack", "Attack", "Attack", 0, 1.0, 2000.0, 8.0, 2, 3.0, None),
     ("release", "Release", "Release", 0, 10.0, 5000.0, 400.0, 2, 3.0, None),
-    ("velamt", "Velocity", "Velocity", 0, 0.0, 1.0, 0.7, 5, 1.0, None),
+    ("velamt", "Velocity", "Velocity", 0, 0.0, 100.0, 70.0, 5, 1.0, None),
     ("volume", "Volume", "Volume", 0, -36.0, 6.0, -6.0, 4, 1.0, None),
 ]
 TOGGLES = [  # name, longname, short, init, off text, on text
@@ -138,9 +138,13 @@ sbus = obj("s ---pp", (700, 700, 60, 22), ins=1, outs=0)
 param_obj = {}
 
 
-def bus_out(name, src, x, y, init_bang=True):
+def bus_out(name, src, x, y, init_bang=True, scale=None):
     pre = obj(f"prepend {name}", (x, y, 100, 22))
-    wire(src, 0, pre, 0)
+    if scale is not None:            # e.g. % dials (0..100) -> 0..1 for pond~
+        sc = obj(f"* {scale}", (x, y - 22, 50, 22), ins=2, outs=1)
+        wire(src, 0, sc, 0); wire(sc, 0, pre, 0)
+    else:
+        wire(src, 0, pre, 0)
     wire(pre, 0, sbus, 0)
     if init_bang:                   # bang -> dial/numbox re-outputs its value at load
         wire(initb, 0, src, 0)      # (not for toggles: a bang would flip them)
@@ -157,7 +161,7 @@ for k, (name, longn, short, ptype, lo, hi, init, ustyle, expo, units) in enumera
             pres=(px, py, 44, 48), varname=longn, parameter_enable=1,
             saved_attribute_attributes=valueof(longn, short, ptype, lo, hi, init, ustyle, expo, units))
     param_obj[name] = d
-    bus_out(name, d, 700 + (k % 5) * 90, 135 + (k // 5) * 90)
+    bus_out(name, d, 700 + (k % 5) * 90, 135 + (k // 5) * 90, scale=0.01 if ustyle == 5 else None)
 
 # toggles under the time dials
 tog_pres = {"keytrack": (412, 92, 44, 17), "freeze": (458, 92, 44, 17), "display": (90, 149, 40, 16)}

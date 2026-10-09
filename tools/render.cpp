@@ -40,6 +40,19 @@ int main(int argc, char** argv) {
         int notes[] = {36, 48, 60, 72}; double t = 0.1;
         for (int nn : notes) { evs.push_back({t, nn, 100}); evs.push_back({t + 2.3, nn, 0}); t += 2.6; }
         len = t + 0.5;
+    } else if (sc == "user" || sc == "userstatic") {
+        // settings from the first Live test screenshot
+        eng.prm.corners = 6.7f; eng.prm.walls = -0.9f; eng.prm.visc = 0.f; eng.prm.refl = 1.f;
+        eng.prm.speed = 0.63f; eng.prm.wander = sc == "user" ? 0.61f : 0.f; eng.prm.width = 0.5f;
+        eng.prm.detune = 6.f; eng.prm.drift = 0.82f; eng.prm.release = 3460.f; eng.prm.volume = -6.f;
+        eng.rebuild();
+        double t = 0.1;
+        for (int nn : {48, 51, 55, 60, 58, 55}) { evs.push_back({t, nn, 100}); evs.push_back({t + 0.9, nn, 0}); t += 1.0; }
+        len = t + 2.0;
+    } else if (sc == "visc") {
+        double t = 0.1;
+        for (float v : {0.f, 0.25f, 0.5f, 0.75f, 0.9f, 1.f}) { (void)v; evs.push_back({t, 48, 100}); evs.push_back({t + 2.0, 48, 0}); t += 2.6; }
+        len = t;
     } else if (sc == "cpu") {
         // worst case: 4 high notes, key tracking at its 4x cap, strong current
         eng.prm.current = 0.8f; eng.prm.speed = 1.f; eng.rebuild();
@@ -52,7 +65,13 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     for (size_t pos = 0; pos < N; pos += block) {
         double now = (double)pos / sr;
-        while (ei < evs.size() && evs[ei].t <= now) { eng.noteOn(evs[ei].note, evs[ei].vel); ei++; }
+        while (ei < evs.size() && evs[ei].t <= now) {
+            if (sc == "visc" && evs[ei].vel > 0) {
+                static int k = 0; const float vs[] = {0.f, 0.25f, 0.5f, 0.75f, 0.9f, 1.f};
+                eng.prm.visc = vs[std::min(k++, 5)]; eng.rebuild();
+            }
+            eng.noteOn(evs[ei].note, evs[ei].vel); ei++;
+        }
         int n = (int)std::min<size_t>(block, N - pos);
         eng.process(&L[pos], &R[pos], n, sr);
     }
