@@ -30,7 +30,7 @@ jobs:
           git clone https://github.com/Cycling74/max-sdk-base max-sdk-base
           git -C max-sdk-base checkout c03a292
 
-      - name: Configure (universal: Intel + Apple Silicon)
+      - name: "Configure (universal: Intel + Apple Silicon)"
         run: >
           cmake -B build -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
