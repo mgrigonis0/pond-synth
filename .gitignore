@@ -1,0 +1,6 @@
+build/
+externals/
+max-sdk-base/
+*.wav
+render
+.DS_Store

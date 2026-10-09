@@ -1,0 +1,70 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  engine-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run the offline engine test
+        run: |
+          g++ -std=c++17 -O3 -Wall -Wextra -o render tools/render.cpp -lpthread
+          ./render melody.wav melody
+          ./render cpu.wav cpu
+
+  mac:
+    runs-on: macos-14
+    needs: engine-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get max-sdk-base
+        run: |
+          git clone https://github.com/Cycling74/max-sdk-base max-sdk-base
+          git -C max-sdk-base checkout c03a292
+
+      - name: Configure (universal: Intel + Apple Silicon)
+        run: >
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Check the external
+        run: |
+          ls -la externals
+          file "externals/pond~.mxo/Contents/MacOS/pond~"
+          codesign -dv "externals/pond~.mxo" 2>&1 || true
+
+      - name: Package
+        run: |
+          mkdir -p dist/pond-synth
+          cp -R "externals/pond~.mxo" dist/pond-synth/
+          cp device/*.amxd device/*.js dist/pond-synth/
+          cp docs/INSTALL.md dist/pond-synth/
+          cd dist && ditto -c -k --sequesterRsrc --keepParent pond-synth ../pond-synth-mac.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pond-synth-mac
+          path: pond-synth-mac.zip
+
+      - name: Publish as the "latest" download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          prerelease: true
+          files: pond-synth-mac.zip
+          body: |
+            Automatic build from ${{ github.sha }}.
+            Download pond-synth-mac.zip, unzip, and follow INSTALL.md inside.
