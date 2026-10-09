@@ -74,6 +74,7 @@ function rebuildShape() {
     var A = boundaryFor(m0, P.walls), B = boundaryFor(m1, P.walls);
     R = [];
     for (var b = 0; b < ANG; b++) R[b] = A[b] + (B[b] - A[b]) * f;
+    fitDirty = true;
 }
 function radiusAt(th) {
     if (th < 0) th += 2 * Math.PI;
@@ -94,10 +95,45 @@ function orbitRadius() { var cap = orbitCap(P.ox, P.oy); return 0.04 + P.osize *
 function stoneRingR(st) { var sigma = 0.8 + Math.pow(st.s, 1.5) * 11; return 2 * sigma * 2 / 108; }
 
 // ---------------- screen mapping ----------------
+// Fit the actual pond + stones (+ the curl handle) into the box, centred, with a small
+// margin. Cached: refitted when the shape or stone positions change, never mid-drag.
+var fit = null, fitDirty = true, fitW = 0, fitH = 0;
+var MARGIN = 6, MAXSTEM = 0.48;
+function boundsFor(t) {
+    var minx = 1e9, maxx = -1e9, miny = 1e9, maxy = -1e9, b, i;
+    function add(x, y) { if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; }
+    for (b = 0; b < ANG; b += 2) {
+        var th = (b + 0.5) / ANG * 2 * Math.PI;
+        add(R[b] * Math.cos(th), R[b] * Math.sin(th) * t);
+    }
+    for (i = 0; i < P.nstones; i++) {           // room for the tallest possible stem at each stone
+        var st = stones[i];
+        add(st.x - 0.06, st.y * t - MAXSTEM - 0.07);
+        add(st.x + 0.06, st.y * t);
+    }
+    var ca = -Math.PI / 2 + P.current * Math.PI * 0.9;
+    add(0.8 * Math.cos(ca), 0.8 * Math.sin(ca) * t);
+    return [minx, maxx, miny, maxy];
+}
+function computeFit(w, h) {
+    // largest tilt (0.5..0.7, keeps the tilted look) whose content still fits the box at full width
+    var best = null;
+    for (var t = 0.7; t >= 0.499; t -= 0.02) {
+        var bb = boundsFor(t), spanX = Math.max(0.2, bb[1] - bb[0]), spanY = Math.max(0.2, bb[3] - bb[2]);
+        var sc = Math.min((w - 2 * MARGIN) / spanX, (h - 2 * MARGIN) / spanY);
+        if (!best || sc > best.sc + 0.5 || (Math.abs(sc - best.sc) <= 0.5 && t > best.t)) best = { t: t, sc: sc, bb: bb };
+    }
+    T = best.t;
+    var b2 = best.bb;
+    return { w: w, h: h, sc: best.sc, cx: w / 2 - best.sc * (b2[0] + b2[1]) / 2, cy: h / 2 - best.sc * (b2[2] + b2[3]) / 2 };
+}
 function view() {
     var sz = mgraphics.size, w = sz[0], h = sz[1];
-    var sc = Math.min(w * 0.47, (h - 4) / (T * 2 + 0.5) );
-    return { w: w, h: h, sc: sc, cx: w / 2, cy: h - sc * T - 3 };
+    if (!R) rebuildShape();
+    if (!fit || w !== fitW || h !== fitH || (fitDirty && !drag)) {
+        fit = computeFit(w, h); fitW = w; fitH = h; fitDirty = false;
+    }
+    return fit;
 }
 function toScreen(v, x, y) { return [v.cx + x * v.sc, v.cy + y * v.sc * T]; }
 function toWorld(v, sx, sy) { return [(sx - v.cx) / v.sc, (sy - v.cy) / (v.sc * T)]; }
@@ -267,7 +303,7 @@ function ondrag(x, y, but, cmd, shift, capslock, option, ctrl) {
     var v = view(), w = toWorld(v, x, y);
     if (!but) {                       // mouse released
         if (drag.kind === "stone" && outside && P.nstones > 1) removeStone(drag.i);
-        outside = false; drag = null; mgraphics.redraw(); return;
+        outside = false; drag = null; fitDirty = true; mgraphics.redraw(); return;
     }
     var st = drag.i !== undefined ? stones[drag.i] : null;
     if (drag.kind === "stone") {
@@ -319,12 +355,13 @@ function removeStone(i) {
 function setParam(name, val, forward) {
     if (name.length === 3 && name.charAt(0) === "s" && "1234".indexOf(name.charAt(1)) >= 0) {
         var i = parseInt(name.charAt(1), 10) - 1, f = name.charAt(2);
-        if (F.indexOf(f) >= 0) { stones[i][f] = val; if (forward) outlet(0, name, val); }
+        if (F.indexOf(f) >= 0) { stones[i][f] = val; if (f === "x" || f === "y") fitDirty = true; if (forward) outlet(0, name, val); }
         return;
     }
     if (P.hasOwnProperty(name)) {
         P[name] = val;
         if (name === "corners" || name === "walls") rebuildShape();
+        if (name === "nstones" || name === "current") fitDirty = true;
         if (name === "ox" || name === "oy" || name === "osize" || name === "width") live.have = false;
         if (forward) outlet(0, name, val);
     }
