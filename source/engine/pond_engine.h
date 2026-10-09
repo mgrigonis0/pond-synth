@@ -30,7 +30,10 @@ constexpr int NCELLS = G * G;
 constexpr double STEPS_PER_POND_SEC = 1500.0;  // water clock at speed 1 (C3)
 constexpr float C2 = 0.2f;             // wave speed^2 (stable < 0.5)
 constexpr int MAX_STONES = 4;
-constexpr int MAX_VOICES = 4;
+constexpr double POND_LOSS = 0.5;      // amplitude kept per pond-second with hard walls (-60 dB in ~10 pond-s)
+constexpr float SPONGE_CELLS = 20.f;   // width of the absorbing band along the walls
+constexpr float SPONGE_MAX = 0.35f;    // friction at the wall when Reflect = 0
+constexpr int MAX_VOICES = 8;
 constexpr int OS = 4;                  // oversampling factor for the orbit read
 constexpr int FIR_TAPS = 64;
 constexpr int ANG = 720;               // boundary samples (polar table)
@@ -62,6 +65,7 @@ struct Params {
 struct Shape {
     std::vector<float> mask = std::vector<float>(NCELLS, 0.f);
     std::vector<float> damp = std::vector<float>(NCELLS, 1.f);
+    std::vector<float> sponge = std::vector<float>(NCELLS, 0.f);   // wall friction on motion (absorbing walls)
     std::array<float, ANG> R{};      // boundary radius per angle (world units)
     float viscCoef = 0.008f;
 };
@@ -116,9 +120,11 @@ inline void buildShape(float corners, float walls, float refl, float visc, Shape
     boundaryForCorners(m1, walls, B);
     for (int b = 0; b < ANG; b++) s.R[b] = A[b] + (B[b] - A[b]) * fr;
 
-    const float d0 = (float)std::pow(0.8, 1.0 / STEPS_PER_POND_SEC);  // 20% energy loss per pond-second
+    const float d0 = (float)std::pow(POND_LOSS, 1.0 / STEPS_PER_POND_SEC);
     const float cell = 2.f / G;
-    const float loss = (1.f - std::clamp(refl, 0.f, 1.f)) * 0.012f;
+    // absorbing walls: friction on the water's motion in a wide band along the wall.
+    // Reflect 1 = no friction (hard wall); 0 = strong friction that soaks waves up.
+    const float absorb = std::pow(1.f - std::clamp(refl, 0.f, 1.f), 1.5f) * SPONGE_MAX;
     for (int gy = 0; gy < G; gy++) {
         for (int gx = 0; gx < G; gx++) {
             int i = gy * G + gx;
@@ -134,8 +140,9 @@ inline void buildShape(float corners, float walls, float refl, float visc, Shape
             float m = std::clamp(edgeCells / 1.5f + 0.5f, 0.f, 1.f); // soft edge ~1.5 cells
             bool border = gx == 0 || gy == 0 || gx == G - 1 || gy == G - 1;
             s.mask[i] = border ? 0.f : m;
-            float band = std::clamp(1.f - edgeCells / 10.f, 0.f, 1.f);
-            s.damp[i] = d0 * (1.f - loss * band * band);
+            float band = std::clamp(1.f - edgeCells / SPONGE_CELLS, 0.f, 1.f);
+            s.damp[i] = d0;
+            s.sponge[i] = absorb * band * band;
         }
     }
     // Viscosity: water (0.002) .. 0.13 (the leapfrog scheme goes unstable above 0.15),
@@ -227,7 +234,7 @@ struct Water {
     }
 
     // adv: precomputed whirlpool rotation (applied every ADVECT_EVERY steps), or null.
-    void step(const float* mask, const float* damp, float visc, const struct AdvectTable* adv);
+    void step(const float* mask, const float* damp, const float* sponge, float visc, const struct AdvectTable* adv);
     void advect(std::vector<float>& f, const AdvectTable& t);
 
     void drop(const Stone& s, const float* mask, float scale = 1.f) {
@@ -251,7 +258,7 @@ struct Water {
     }
 };
 
-inline void Water::step(const float* mask, const float* damp, float visc, const AdvectTable* adv) {
+inline void Water::step(const float* mask, const float* damp, const float* sponge, float visc, const AdvectTable* adv) {
     if (npend) applyPending(mask);
     float* U = u.data(); float* P = p.data(); float* L = lp.data();
     for (int y = 1; y < G - 1; y++) {
@@ -259,7 +266,7 @@ inline void Water::step(const float* mask, const float* damp, float visc, const 
         for (int x = 1; x < G - 1; x++) {
             int i = r + x;
             float l = U[i - 1] + U[i + 1] + U[i - G] + U[i + G] - 4.f * U[i];
-            float n = (2.f * U[i] - P[i] + C2 * l + visc * (l - L[i])) * damp[i] * mask[i];
+            float n = (2.f * U[i] - P[i] + C2 * l + visc * (l - L[i]) - sponge[i] * (U[i] - P[i])) * damp[i] * mask[i];
             L[i] = l;
             P[i] = n;            // P now holds the NEW field
         }
@@ -344,6 +351,9 @@ struct Voice {
     float firBuf[2][2 * FIR_TAPS] = {};
     double dph[2] = {0, 0}; float rrf[2] = {1, 1};
     bool stealing = false, pendOff = false; uint8_t pendNote = 0, pendVel = 0;
+    // per-ear high-pass just below the note: removes the slosh/thump "boom" under the pitch
+    float hb0 = 1, hb1 = 0, hb2 = 0, ha1 = 0, ha2 = 0;
+    float hx1[2] = {0, 0}, hx2[2] = {0, 0}, hy1[2] = {0, 0}, hy2[2] = {0, 0};
     int firPos = 0;
     Wobble wobP[2], wobR[2];
 };
@@ -424,7 +434,7 @@ public:
             double t = k / STEPS_PER_POND_SEC;
             for (int i = 0; i < n; i++)
                 if (!landed[i] && t >= lt[i]) { landed[i] = true; bake.startDrop(st[i]); }
-            if (k < steps) bake.step(s.mask.data(), s.damp.data(), s.viscCoef, &adv);
+            if (k < steps) bake.step(s.mask.data(), s.damp.data(), s.sponge.data(), s.viscCoef, &adv);
         }
         std::lock_guard<std::mutex> lk(shareLock);
         shared.shape = std::move(s);
@@ -449,6 +459,7 @@ public:
     // ---- audio thread ------------------------------------------------------
     void process(float* outL, float* outR, int n, double sr) {
         denormalsOff();
+        curSr = sr;
         pullShared();
         Event e;
         while (queue.pop(e)) handle(e, sr);
@@ -458,7 +469,7 @@ public:
         const float atkS = std::max(0.001f, prm.attack.load() / 1000.f);
         const float relK = std::exp(-1.f / (relS * 0.25f * (float)sr));   // ~-35 dB at the release time
         const float atkInc = 1.f / (atkS * (float)sr);
-        const float stealK = std::exp(-1.f / (0.0008f * (float)sr));      // ~4 ms fade to -55 dB
+        const float stealK = std::exp(-1.f / (0.0025f * (float)sr));      // ~15 ms fade to -55 dB (longer than a low note's cycle)
         const float volG = std::pow(10.f, prm.volume.load() / 20.f);
         const float velAmt = std::clamp(prm.velamt.load(), 0.f, 1.f);
         const bool frozen = prm.freeze.load() != 0;
@@ -514,7 +525,7 @@ public:
                 v.stepAcc += stepsPerSample;
                 while (v.stepAcc >= 1.0) {
                     v.stepAcc -= 1.0;
-                    v.w.step(mask, damp, viscC, &advTable);
+                    v.w.step(mask, damp, local.shape.sponge.data(), viscC, &advTable);
                     v.pondTime += 1.0 / STEPS_PER_POND_SEC;
                     for (int i = 0; i < local.nStones; i++)
                         if (!v.landed[i] && v.pondTime >= local.land[i]) { v.landed[i] = true; v.w.startDrop(local.stones[i]); }
@@ -558,7 +569,10 @@ public:
                         a0 += fir[t] * win[t]; a1 += fir[t + 1] * win[t + 1];
                         a2 += fir[t + 2] * win[t + 2]; a3 += fir[t + 3] * win[t + 3];
                     }
-                    y[ear] = (a0 + a1) + (a2 + a3);
+                    const float xin = (a0 + a1) + (a2 + a3);
+                    const float yo = v.hb0 * xin + v.hb1 * v.hx1[ear] + v.hb2 * v.hx2[ear] - v.ha1 * v.hy1[ear] - v.ha2 * v.hy2[ear];
+                    v.hx2[ear] = v.hx1[ear]; v.hx1[ear] = xin; v.hy2[ear] = v.hy1[ear]; v.hy1[ear] = yo;
+                    y[ear] = yo;
                 }
                 v.firPos = (v.firPos + OS) % FIR_TAPS;
                 float g = v.env * velG * volG * OUT_GAIN;
@@ -603,6 +617,7 @@ private:
     float sm[4] = {0, 0, 0.3f, 0.04f}; bool orbInit = false;
     AdvectTable advTable;
     uint64_t clock = 0;
+    double curSr = 44100.0;
 
     std::mutex dispLock;
     float disp[DISP * DISP] = {};
@@ -685,6 +700,15 @@ private:
         v.active = true; v.gate = !v.pendOff; v.pendOff = false; v.stealing = false; v.note = note; v.vel = vel / 127.f;
         v.env = 0.f; v.phase[0] = v.phase[1] = 0.0; v.startedAt = clock + 1;
         std::memset(v.firBuf, 0, sizeof(v.firBuf)); v.firPos = 0;
+        // 2nd-order Butterworth high-pass at 0.6 x the fundamental
+        {
+            double f0 = 440.0 * std::pow(2.0, (note - 69) / 12.0), fc = std::max(15.0, 0.6 * f0);
+            double w = 2 * kPi * fc / curSr, cw = std::cos(w), al = std::sin(w) / (2 * 0.7071);
+            double a0 = 1 + al;
+            v.hb0 = (float)((1 + cw) / 2 / a0); v.hb1 = (float)(-(1 + cw) / a0); v.hb2 = v.hb0;
+            v.ha1 = (float)(-2 * cw / a0); v.ha2 = (float)((1 - al) / a0);
+            for (int e = 0; e < 2; e++) v.hx1[e] = v.hx2[e] = v.hy1[e] = v.hy2[e] = 0.f;
+        }
     }
 
     void updateDisplay(int newest, int nActive, int n, double sr) {

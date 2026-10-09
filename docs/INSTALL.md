@@ -80,5 +80,5 @@ Every control is a Live parameter, so it's saved with your set and can be automa
 - Pond shape, medium, current, start point and stone changes apply to the **next** notes
   (notes already playing keep their pond).
 - No loops or ping-pong yet (v0.2).
-- CPU: about 6% of one core for a single note on the test machine, up to ~33% for
-  4 high notes with a strong current.
+- 8 voices. When a 9th note comes in, the oldest note fades out over ~15 ms first.
+- CPU (test machine): about 5% of one core per note; an 8-note chord ~36%.

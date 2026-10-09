@@ -53,6 +53,12 @@ int main(int argc, char** argv) {
         double t = 0.1;
         for (float v : {0.f, 0.25f, 0.5f, 0.75f, 0.9f, 1.f}) { (void)v; evs.push_back({t, 48, 100}); evs.push_back({t + 2.0, 48, 0}); t += 2.6; }
         len = t;
+    } else if (sc == "chord8") {
+        // 8-note chords, then a second chord before the first has released (voice stealing)
+        for (int nn : {36, 43, 48, 52, 55, 59, 62, 67}) { evs.push_back({0.1, nn, 100}); evs.push_back({2.0, nn, 0}); }
+        for (int nn : {38, 45, 50, 53, 57, 60, 64, 69}) { evs.push_back({2.2, nn, 100}); evs.push_back({4.5, nn, 0}); }
+        eng.prm.release = 3000.f;
+        len = 7.0;
     } else if (sc == "cpu") {
         // worst case: 4 high notes, key tracking at its 4x cap, strong current
         eng.prm.current = 0.8f; eng.prm.speed = 1.f; eng.rebuild();
