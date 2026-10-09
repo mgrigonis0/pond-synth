@@ -59,6 +59,12 @@ int main(int argc, char** argv) {
         for (int nn : {38, 45, 50, 53, 57, 60, 64, 69}) { evs.push_back({2.2, nn, 100}); evs.push_back({4.5, nn, 0}); }
         eng.prm.release = 3000.f;
         len = 7.0;
+    } else if (sc == "freeze") {
+        // play, freeze at 1.0 s, release, then play new notes while frozen
+        evs.push_back({0.1, 48, 100}); evs.push_back({1.2, 48, 0});
+        evs.push_back({2.0, 55, 100}); evs.push_back({3.0, 55, 0});
+        evs.push_back({3.5, 43, 100}); evs.push_back({4.5, 43, 0});
+        len = 5.5;
     } else if (sc == "cpu") {
         // worst case: 4 high notes, key tracking at its 4x cap, strong current
         eng.prm.current = 0.8f; eng.prm.speed = 1.f; eng.rebuild();
@@ -78,6 +84,7 @@ int main(int argc, char** argv) {
             }
             eng.noteOn(evs[ei].note, evs[ei].vel); ei++;
         }
+        if (sc == "freeze") eng.prm.freeze = now >= 1.0 ? 1 : 0;
         int n = (int)std::min<size_t>(block, N - pos);
         eng.process(&L[pos], &R[pos], n, sr);
     }

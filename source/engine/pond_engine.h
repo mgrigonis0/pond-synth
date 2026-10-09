@@ -473,6 +473,9 @@ public:
         const float volG = std::pow(10.f, prm.volume.load() / 20.f);
         const float velAmt = std::clamp(prm.velamt.load(), 0.f, 1.f);
         const bool frozen = prm.freeze.load() != 0;
+        if (frozen && !wasFrozen) captureFrozen();
+        wasFrozen = frozen;
+        frozenNow = frozen;
         const bool keytrack = prm.keytrack.load() != 0;
         const float speedK = std::clamp(prm.speed.load(), 0.f, 4.f);
         const float omega = omegaFor(prm.current.load());
@@ -618,6 +621,8 @@ private:
     AdvectTable advTable;
     uint64_t clock = 0;
     double curSr = 44100.0;
+    bool wasFrozen = false, frozenNow = false, haveFrozen = false;
+    Water frozenWater; double frozenTime = 0, frozenBlend = 0; bool frozenLanded[MAX_STONES] = {};
 
     std::mutex dispLock;
     float disp[DISP * DISP] = {};
@@ -692,11 +697,32 @@ private:
         (void)sr;
     }
 
+    // Freeze: grab the water of the most recent note (playing or not) so new notes
+    // play that exact moment instead of the (possibly still flat) start point.
+    void captureFrozen() {
+        int pick = -1; uint64_t newest = 0;
+        for (int i = 0; i < MAX_VOICES; i++)
+            if (voices[i].startedAt > newest && !voices[i].stealing) { newest = voices[i].startedAt; pick = i; }
+        if (pick < 0) { haveFrozen = false; return; }
+        frozenWater.copyFrom(voices[pick].w);
+        frozenTime = voices[pick].pondTime;
+        frozenBlend = voices[pick].stepAcc;
+        for (int i = 0; i < MAX_STONES; i++) frozenLanded[i] = voices[pick].landed[i];
+        haveFrozen = true;
+    }
+
     void startVoice(Voice& v, uint8_t note, uint8_t vel) {
-        v.w.copyFrom(local.snap);
-        v.pondTime = local.snapTime;
-        v.stepAcc = 0.0;
-        for (int i = 0; i < MAX_STONES; i++) v.landed[i] = (i < local.nStones) && (local.land[i] <= local.snapTime);
+        if (frozenNow && haveFrozen) {
+            v.w.copyFrom(frozenWater);
+            v.pondTime = frozenTime;
+            v.stepAcc = frozenBlend;
+            for (int i = 0; i < MAX_STONES; i++) v.landed[i] = frozenLanded[i];
+        } else {
+            v.w.copyFrom(local.snap);
+            v.pondTime = local.snapTime;
+            v.stepAcc = 0.0;
+            for (int i = 0; i < MAX_STONES; i++) v.landed[i] = (i < local.nStones) && (local.land[i] <= local.snapTime);
+        }
         v.active = true; v.gate = !v.pendOff; v.pendOff = false; v.stealing = false; v.note = note; v.vel = vel / 127.f;
         v.env = 0.f; v.phase[0] = v.phase[1] = 0.0; v.startedAt = clock + 1;
         std::memset(v.firBuf, 0, sizeof(v.firBuf)); v.firPos = 0;
