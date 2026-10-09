@@ -36,6 +36,7 @@ constexpr double POND_LOSS = 0.5;      // amplitude kept per pond-second with ha
 constexpr float SPONGE_CELLS = 20.f;   // width of the absorbing band along the walls
 constexpr float SPONGE_MAX = 0.35f;    // friction at the wall when Reflect = 0
 constexpr int MAX_VOICES = 8;
+constexpr float FREEZE_MAX_T = 8.f;    // a frozen moment is re-simulated (on changes) up to this pond time
 constexpr int OS = 4;                  // oversampling factor for the orbit read
 constexpr int FIR_TAPS = 64;
 constexpr int ANG = 720;               // boundary samples (polar table)
@@ -63,6 +64,11 @@ struct Params {
     // playing
     std::atomic<float> attack{8.f}, release{400.f}, velamt{0.7f}, volume{-6.f};
     std::atomic<float> clarity{0.f};      // 0 = continuous (alive), 1 = water held per wave cycle (clean)
+    std::atomic<float> breathe{0.3f};     // freeze: 0 = nearly still .. 1 = loops widely around the moment
+    // material: stiff 0 = membrane/water .. 1 = stiff plate (dispersive); grain 0 = even .. 1 = grained like wood
+    std::atomic<float> stiff{0.f}, grain{0.f};
+    // rain: density 0..1 (0 = off), drop size 0..1
+    std::atomic<float> rain{0.f}, drop{0.3f};
 };
 
 // --------------------------------------------------------------------------
@@ -73,6 +79,8 @@ struct Shape {
     std::vector<float> sponge = std::vector<float>(NCELLS, 0.f);   // wall friction on motion (absorbing walls)
     std::array<float, ANG> R{};      // boundary radius per angle (world units)
     float viscCoef = 0.008f;
+    // material: wave speed^2 (c2), plate stiffness (stiffK, biharmonic), grain (ax: speed^2 along x, 2-ax along y)
+    float c2 = C2, stiffK = 0.f, ax = 1.f;
 };
 
 inline float worldToGrid(float w) { return (w + 1.f) * 0.5f * G - 0.5f; }
@@ -115,8 +123,8 @@ inline void boundaryForCorners(int m, float walls, std::array<float, ANG>& out) 
     }
 }
 
-inline void buildShape(float corners, float walls, float refl, float visc, Shape& s) {
-    corners = std::clamp(corners, 3.f, 12.f);
+inline void buildShape(float corners, float walls, float refl, float visc, float stiff, float grain, Shape& s) {
+    corners = std::round(std::clamp(corners, 3.f, 12.f));   // whole corner counts only (blends looked broken)
     walls = std::clamp(walls, -1.f, 1.f);
     int m0 = (int)std::floor(corners), m1 = std::min(12, m0 + 1);
     float fr = corners - m0;
@@ -153,11 +161,20 @@ inline void buildShape(float corners, float walls, float refl, float visc, Shape
     // Viscosity: water (0.002) .. 0.13 (the leapfrog scheme goes unstable above 0.15),
     // exponential so the whole knob is usable, plus a drag on all motion over the top
     // third so the far end behaves like a near-solid: ripples barely spread and die fast.
+    // Material. The fastest grid mode moves at 8*c2 + 64*K; holding that at water's 1.6 keeps the
+    // stability budget fixed while stiffness trades plain wave speed for dispersion (fine ripples
+    // run ahead of coarse ones, like a plate). Grain makes waves run faster along one axis than
+    // the other (like wood); the fastest mode is unchanged, so it costs no stability either.
+    const float sf = std::clamp(stiff, 0.f, 1.f);
+    s.c2 = C2 * (1.f - sf) * (1.f - sf);
+    s.stiffK = (8.f * C2 - 8.f * s.c2) / 64.f;
+    s.ax = 1.f + 0.8f * std::clamp(grain, 0.f, 1.f);
+    const float aMax = 8.f * C2;
     const float vv = std::clamp(visc, 0.f, 1.f);
     s.viscCoef = 0.002f * std::pow(65.f, vv);
-    // Stability of the scheme needs 16*visc + 2*friction < 2.4 (fastest grid mode);
-    // keep a margin so near-solid + absorbing walls can never run away.
-    s.viscCoef = std::min(s.viscCoef, (2.0f - 2.f * absorb) / 16.f);
+    // Stability of the leapfrog scheme at the fastest grid mode: a + 2*(8*visc + friction) < 4.
+    // Keep a margin of 0.4 so near-solid + absorbing walls can never run away.
+    s.viscCoef = std::max(0.f, std::min(s.viscCoef, ((3.6f - aMax) * 0.5f - absorb) / 8.f));
     float t = std::clamp((vv - 0.6f) / 0.4f, 0.f, 1.f); t = t * t * (3 - 2 * t);
     const float drag = (float)std::pow(1.0 - 0.995 * t, 1.0 / STEPS_PER_POND_SEC);   // up to 99.5% loss per pond-second
     for (int i = 0; i < NCELLS; i++) s.damp[i] *= drag;
@@ -219,25 +236,33 @@ struct Water {
     std::vector<float> p = std::vector<float>(NCELLS, 0.f);   // previous height
     std::vector<float> lp = std::vector<float>(NCELLS, 0.f);  // previous laplacian (viscosity)
     std::vector<float> tmp = std::vector<float>(NCELLS, 0.f);
+    std::vector<float> lc = std::vector<float>(NCELLS, 0.f);  // current laplacian (plate pass)
+    uint32_t rainSeed = 0x9e3779b9u;   // rain is deterministic: every note gets the same drops
+    double rainNext = -1.0;            // pond time of the next raindrop (-1 = not scheduled)
 
     void clear() {
         std::fill(u.begin(), u.end(), 0.f); std::fill(p.begin(), p.end(), 0.f);
-        std::fill(lp.begin(), lp.end(), 0.f); npend = 0;
+        std::fill(lp.begin(), lp.end(), 0.f); npend = 0; rainSeed = 0x9e3779b9u; rainNext = -1.0;
     }
     void copyFrom(const Water& o) {
-        u = o.u; p = o.p; lp = o.lp; npend = o.npend;
+        std::memcpy(u.data(), o.u.data(), sizeof(float) * NCELLS);
+        std::memcpy(p.data(), o.p.data(), sizeof(float) * NCELLS);
+        std::memcpy(lp.data(), o.lp.data(), sizeof(float) * NCELLS);
+        npend = o.npend;
         for (int i = 0; i < o.npend; i++) pend[i] = o.pend[i];
-        advectCount = o.advectCount;
+        advectCount = o.advectCount; rainSeed = o.rainSeed; rainNext = o.rainNext;
     }
+    float rnd() { rainSeed = rainSeed * 1664525u + 1013904223u; return (rainSeed >> 8) / 16777216.f; }
 
     int advectCount = 0;
 
     // Stones land over DROP_STEPS pond steps (raised-cosine), not in one step: an
     // instant height jump under the orbit is heard as a click.
     static constexpr int DROP_STEPS = 12;
-    struct Pending { Stone s; int k = 0; };
-    Pending pend[8]; int npend = 0;
-    void startDrop(const Stone& st) { if (npend < 8) { pend[npend].s = st; pend[npend].k = 0; npend++; } }
+    struct Pending { Stone s; int k = 0; float scale = 1.f; };
+    static constexpr int MAXPEND = 16;
+    Pending pend[MAXPEND]; int npend = 0;
+    void startDrop(const Stone& st, float scale = 1.f) { if (npend < MAXPEND) { pend[npend].s = st; pend[npend].k = 0; pend[npend].scale = scale; npend++; } }
     void applyPending(const float* mask) {
         static const auto W = [] {
             std::array<float, DROP_STEPS> w{}; double sum = 0;
@@ -246,13 +271,13 @@ struct Water {
             return w;
         }();
         for (int i = 0; i < npend;) {
-            drop(pend[i].s, mask, W[pend[i].k]);
+            drop(pend[i].s, mask, W[pend[i].k] * pend[i].scale);
             if (++pend[i].k >= DROP_STEPS) pend[i] = pend[--npend]; else i++;
         }
     }
 
     // adv: precomputed whirlpool rotation (applied every ADVECT_EVERY steps), or null.
-    void step(const float* mask, const float* damp, const float* sponge, float visc, const struct AdvectTable* adv);
+    void step(const float* mask, const Shape& sh, const struct AdvectTable* adv);
     void advect(std::vector<float>& f, const AdvectTable& t);
 
     void drop(const Stone& s, const float* mask, float scale = 1.f) {
@@ -276,18 +301,45 @@ struct Water {
     }
 };
 
-inline void Water::step(const float* mask, const float* damp, const float* sponge, float visc, const AdvectTable* adv) {
+inline void Water::step(const float* mask, const Shape& sh, const AdvectTable* adv) {
     if (npend) applyPending(mask);
+    const float* damp = sh.damp.data(); const float* sponge = sh.sponge.data();
+    const float visc = sh.viscCoef, c2 = sh.c2, K = sh.stiffK;
+    const float ax = sh.ax, ay = 2.f - sh.ax;   // grain: speed^2 along x vs y
     float* U = u.data(); float* P = p.data(); float* L = lp.data();
-    for (int y = 1; y < G - 1; y++) {
-        int r = y * G;
-        for (int x = 1; x < G - 1; x++) {
-            int i = r + x;
-            float l = U[i - 1] + U[i + 1] + U[i - G] + U[i + G] - 4.f * U[i];
-            float n = (2.f * U[i] - P[i] + C2 * l + visc * (l - L[i]) - sponge[i] * (U[i] - P[i])) * damp[i] * mask[i];
-            L[i] = l;
-            P[i] = n;            // P now holds the NEW field
+    if (K <= 0.f) {
+        for (int y = 1; y < G - 1; y++) {
+            int r = y * G;
+            for (int x = 1; x < G - 1; x++) {
+                int i = r + x;
+                float l = ax * (U[i - 1] + U[i + 1]) + ay * (U[i - G] + U[i + G]) - 4.f * U[i];
+                float n = (2.f * U[i] - P[i] + c2 * l + visc * (l - L[i]) - sponge[i] * (U[i] - P[i])) * damp[i] * mask[i];
+                L[i] = l;
+                P[i] = n;            // P now holds the NEW field
+            }
         }
+    } else {
+        // plate: biharmonic = laplacian of the (wall-clamped) laplacian
+        float* Lc = lc.data();
+        for (int y = 1; y < G - 1; y++) {
+            int r = y * G;
+            for (int x = 1; x < G - 1; x++) {
+                int i = r + x;
+                float l = ax * (U[i - 1] + U[i + 1]) + ay * (U[i - G] + U[i + G]) - 4.f * U[i];
+                Lc[i] = l * mask[i];
+            }
+        }
+        for (int y = 1; y < G - 1; y++) {
+            int r = y * G;
+            for (int x = 1; x < G - 1; x++) {
+                int i = r + x;
+                float l = Lc[i];
+                float bl = ax * (Lc[i - 1] + Lc[i + 1]) + ay * (Lc[i - G] + Lc[i + G]) - 4.f * l;
+                float n = (2.f * U[i] - P[i] + c2 * l - K * bl + visc * (l - L[i]) - sponge[i] * (U[i] - P[i])) * damp[i] * mask[i];
+                P[i] = n;
+            }
+        }
+        lp.swap(lc);                 // lp = this step's laplacian (viscosity uses it next step)
     }
     u.swap(p);                   // u = new, p = previous
     if (adv && adv->active() && ++advectCount >= ADVECT_EVERY) {
@@ -319,6 +371,32 @@ inline void landingTimes(const Stone* st, int n, float* out) {
     float first = 1e9f;
     for (int i = 0; i < n; i++) first = std::min(first, fallTime(st[i]));
     for (int i = 0; i < n; i++) out[i] = fallTime(st[i]) - first + 0.01f;
+}
+
+// Rain: a steady random stream of small drops (deterministic per pond copy).
+struct RainSpec { float rate = 0.f, size = 0.3f, scale = 1.f; };
+inline RainSpec rainSpec(float rain, float drop) {
+    RainSpec r;
+    rain = std::clamp(rain, 0.f, 1.f);
+    r.rate = rain > 0.001f ? 1.5f * std::pow(250.f, rain) : 0.f;        // drops per pond-second, ~1.5 .. 375
+    r.size = 0.02f + 0.5f * std::clamp(drop, 0.f, 1.f);
+    r.scale = 1.f / std::sqrt(1.f + r.rate / 20.f);                    // denser rain = lighter drops
+    return r;
+}
+inline void rainTick(Water& w, double t, const RainSpec& r, const float* mask) {
+    if (r.rate <= 0.f) { w.rainNext = -1.0; return; }
+    if (w.rainNext < 0.0 || w.rainNext < t - 0.05) w.rainNext = t + (-std::log(1.f - 0.999f * w.rnd())) / r.rate;
+    while (t >= w.rainNext) {
+        for (int tries = 0; tries < 6; tries++) {
+            float x = w.rnd() * 1.9f - 0.95f, y = w.rnd() * 1.9f - 0.95f;
+            int gx = (int)std::lround(worldToGrid(x)), gy = (int)std::lround(worldToGrid(y));
+            if (gx < 1 || gy < 1 || gx >= G - 1 || gy >= G - 1 || mask[gy * G + gx] < 0.5f) continue;
+            Stone d{x, y, 0.1f, r.size * (0.6f + 0.8f * w.rnd()), 0.05f + 0.25f * w.rnd()};
+            w.startDrop(d, r.scale);
+            break;
+        }
+        w.rainNext += (-std::log(1.f - 0.999f * w.rnd())) / r.rate;
+    }
 }
 
 inline float bilinear(const float* F, float gx, float gy) {
@@ -369,10 +447,20 @@ constexpr double BW4_Q1 = 0.5411961, BW4_Q2 = 1.3065630;   // 4th-order Butterwo
 
 struct Voice {
     Water w;
+    Water w2;                     // second lane: the breathing freeze loop crossfades two copies
     bool active = false, gate = false;
     int note = -1; float vel = 1.f;
     double pondTime = 0.0;        // pond seconds since the stones were released
+    double pondTime2 = 0.0;
     double stepAcc = 0.0;         // fractional pond step
+    // freeze loop: lane 0 restarts from the frozen moment at loopPh = 0, lane 1 at 0.5;
+    // weights sin^2 / cos^2 of the loop phase, so each restarts while silent
+    bool loop = false; double loopPh = 0.0; float exitW = 0.f;
+    bool landed2[MAX_STONES] = {};
+    // quiet tail: once a releasing note is 40 dB under its peak, its water stops simulating
+    // and it plays on from a held snapshot (nearly free on the CPU)
+    float peakLevel = 0.f, heldX = 0.f; bool holdReq = false, held = false;
+    float holdTab[2][129] = {};
     double phase[2] = {0, 0};     // orbit phase per ear (0..1)
     float env = 0.f;
     uint64_t startedAt = 0;
@@ -448,8 +536,8 @@ public:
     // corners/walls/visc/refl/current/start or the stones. Heavy (up to ~30 ms).
     void rebuild() {
         Shape s;
-        buildShape(prm.corners.load(), prm.walls.load(), prm.refl.load(), prm.visc.load(), s);
-        // bake the pond state at the start point
+        buildShape(prm.corners.load(), prm.walls.load(), prm.refl.load(), prm.visc.load(),
+                   prm.stiff.load(), prm.grain.load(), s);
         Water bake;
         Stone st[MAX_STONES]; int n;
         {
@@ -457,24 +545,40 @@ public:
             n = nStonesMain;
             for (int i = 0; i < MAX_STONES; i++) st[i] = stonesMain[i];
         }
+        const RainSpec rs = rainSpec(prm.rain.load(), prm.drop.load());
         double start = std::clamp((double)prm.start.load(), 0.0, 8.0);
         long steps = (long)(start * STEPS_PER_POND_SEC);
+        // while frozen, the frozen moment is re-simulated with the new settings too
+        const int fser = frzSerialMain.load();
+        const bool doFrz = prm.freeze.load() != 0 && fser > 0;
+        long fsteps = doFrz ? (long)(std::min((double)FREEZE_MAX_T, frzAtMain.load()) * STEPS_PER_POND_SEC) : -1;
+        long last = std::max(steps, fsteps);
         AdvectTable adv; { CurrentSpec c = currentSpec(); adv.build(c.mode, c.omega, c.vx, c.vy); }
         bool landed[MAX_STONES] = {};
         float lt[MAX_STONES] = {};
         landingTimes(st, n, lt);
-        for (long k = 0; k <= steps; k++) {
+        Water snapStart, snapFrz; bool landedFrz[MAX_STONES] = {};
+        for (long k = 0; k <= last; k++) {
             double t = k / STEPS_PER_POND_SEC;
             for (int i = 0; i < n; i++)
                 if (!landed[i] && t >= lt[i]) { landed[i] = true; bake.startDrop(st[i]); }
-            if (k < steps) bake.step(s.mask.data(), s.damp.data(), s.sponge.data(), s.viscCoef, &adv);
+            rainTick(bake, t, rs, s.mask.data());
+            if (k == steps) snapStart.copyFrom(bake);
+            if (k == fsteps) { snapFrz.copyFrom(bake); for (int i = 0; i < MAX_STONES; i++) landedFrz[i] = landed[i]; }
+            if (k < last) bake.step(s.mask.data(), s, &adv);
         }
         std::lock_guard<std::mutex> lk(shareLock);
         shared.shape = std::move(s);
-        shared.snap.copyFrom(bake);
+        shared.snap.copyFrom(snapStart);
         shared.snapTime = steps / STEPS_PER_POND_SEC;
         for (int i = 0; i < MAX_STONES; i++) { shared.stones[i] = st[i]; shared.land[i] = lt[i]; }
         shared.nStones = n;
+        shared.rain = rs;
+        if (doFrz) {
+            shared.frz.copyFrom(snapFrz); shared.frzTime = fsteps / STEPS_PER_POND_SEC;
+            for (int i = 0; i < MAX_STONES; i++) shared.frzLanded[i] = landedFrz[i];
+            shared.frzSerial = fser;
+        }
         shared.version++;
     }
 
@@ -493,7 +597,12 @@ public:
     void process(float* outL, float* outR, int n, double sr) {
         denormalsOff();
         curSr = sr;
+        const bool frozen = prm.freeze.load() != 0;
+        frozenNow = frozen;
         pullShared();
+        if (frozen && !wasFrozen) captureFrozen();
+        if (!frozen) haveFrozen = false;
+        wasFrozen = frozen;
         Event e;
         while (queue.pop(e)) handle(e, sr);
         smoothMask(n, sr);
@@ -503,12 +612,10 @@ public:
         const float relK = std::exp(-1.f / (relS * 0.25f * (float)sr));   // ~-35 dB at the release time
         const float atkInc = 1.f / (atkS * (float)sr);
         const float stealK = std::exp(-1.f / (0.0025f * (float)sr));      // ~15 ms fade to -55 dB (longer than a low note's cycle)
+        const float exitK = std::exp(-1.f / (0.006f * (float)sr));        // freeze-off crossfade (~30 ms)
+        const float holdInc = 1.f / (0.05f * (float)sr);                  // quiet-tail crossfade, 50 ms
         const float volG = std::pow(10.f, prm.volume.load() / 20.f);
         const float velAmt = std::clamp(prm.velamt.load(), 0.f, 1.f);
-        const bool frozen = prm.freeze.load() != 0;
-        if (frozen && !wasFrozen) captureFrozen();
-        wasFrozen = frozen;
-        frozenNow = frozen;
         const bool keytrack = prm.keytrack.load() != 0;
         const float speedK = std::clamp(prm.speed.load(), 0.f, 4.f);
         { CurrentSpec c = currentSpec(); if (!advTable.same(c.mode, c.omega, c.vx, c.vy)) advTable.build(c.mode, c.omega, c.vx, c.vy); }
@@ -517,6 +624,10 @@ public:
         const float drift = std::clamp(prm.drift.load(), 0.f, 1.f);
         const float wander = std::clamp(prm.wander.load(), 0.f, 1.f);
         const float clarity = std::clamp(prm.clarity.load(), 0.f, 1.f);
+        const float br = std::clamp(prm.breathe.load(), 0.f, 1.f);
+        const double loopL = 0.03 + 0.6 * br * br;                          // freeze loop length, pond seconds
+        const double dphi = 1.0 / (loopL * STEPS_PER_POND_SEC);             // loop phase per pond step
+        const RainSpec& rs = local.rain;
 
         // orbit centre with wander, kept inside the pond
         float ox = std::clamp(prm.ox.load(), -0.95f, 0.95f), oy = std::clamp(prm.oy.load(), -0.95f, 0.95f);
@@ -537,9 +648,9 @@ public:
         std::fill(outL, outL + n, 0.f);
         std::fill(outR, outR + n, 0.f);
         const float* mask = maskCur.data();
-        const float* damp = local.shape.damp.data();
-        const float viscC = local.shape.viscCoef;
         int nActive = 0; int newest = -1; uint64_t newestT = 0;
+        const float gc = (G - 1) * 0.5f;
+        const bool swirl = advTable.mode == 0;
 
         for (int vi = 0; vi < MAX_VOICES; vi++) {
             Voice& v = voices[vi];
@@ -549,8 +660,14 @@ public:
             const float f0 = 440.f * std::pow(2.f, (v.note - 69) / 12.f);
             const float key = keytrack ? f0 / 130.8128f : 1.f;
             const float rate = std::min(MAX_POND_RATE, speedK * key);       // CPU grows with this, so it's capped
-            const double stepsPerSample = frozen ? 0.0 : STEPS_PER_POND_SEC * rate / sr;
+            const double stepsPerSample = STEPS_PER_POND_SEC * rate / sr;
             const float velG = (1.f - velAmt) + velAmt * v.vel;
+            // freeze on/off for this voice
+            const bool wantLoop = frozen && haveFrozen;
+            if (wantLoop && !v.loop) enterLoop(v);
+            if (!wantLoop && v.loop) exitLoop(v);
+            if (v.loop || v.exitW > 0.f) { v.held = false; v.holdReq = false; v.heldX = 0.f; }
+            float blockPeak = 0.f;
             for (int s = 0; s < n; s++) {
                 // envelope
                 if (v.stealing) {
@@ -558,16 +675,34 @@ public:
                     if (v.env < 1e-3f) { startVoice(v, v.pendNote, v.pendVel); break; }   // new note starts next block
                 } else if (v.gate) { v.env = std::min(1.f, v.env + atkInc); }
                 else { v.env *= relK; if (v.env < 1e-4f) { v.active = false; v.env = 0.f; break; } }
-                // advance the water
-                v.stepAcc += stepsPerSample;
-                while (v.stepAcc >= 1.0) {
-                    v.stepAcc -= 1.0;
-                    v.w.step(mask, damp, local.shape.sponge.data(), viscC, &advTable);
-                    v.pondTime += 1.0 / STEPS_PER_POND_SEC;
-                    for (int i = 0; i < local.nStones; i++)
-                        if (!v.landed[i] && v.pondTime >= local.land[i]) { v.landed[i] = true; v.w.startDrop(local.stones[i]); }
+                // advance the water (both lanes while looping / crossfading)
+                const bool two = v.loop || v.exitW > 0.f;
+                if (!v.held) {
+                    v.stepAcc += stepsPerSample;
+                    while (v.stepAcc >= 1.0) {
+                        v.stepAcc -= 1.0;
+                        stepLane(v, 0, mask, rs);
+                        if (two) stepLane(v, 1, mask, rs);
+                        if (v.loop) {
+                            const double prev = v.loopPh;
+                            v.loopPh += dphi;
+                            if (v.loopPh >= 1.0) { v.loopPh -= std::floor(v.loopPh); restartLane(v, 0); }
+                            if (prev < 0.5 && v.loopPh >= 0.5) restartLane(v, 1);
+                        }
+                    }
                 }
-                const float blend = (float)v.stepAcc;
+                const float blend = v.held ? 0.f : (float)v.stepAcc;
+                // lane weights
+                float wA = 1.f, wB = 0.f;
+                if (v.loop) {
+                    float sp = std::sin((float)kPi * (float)(v.loopPh + blend * dphi));
+                    wA = sp * sp; wB = 1.f - wA;
+                } else if (v.exitW > 0.f) {
+                    wB = v.exitW; wA = 1.f - wB;
+                    v.exitW *= exitK; if (v.exitW < 1e-3f) v.exitW = 0.f;
+                }
+                // quiet tail crossfade into the held snapshot
+                if (v.holdReq && !v.held) { v.heldX += holdInc; if (v.heldX >= 1.f) { v.heldX = 1.f; v.held = true; } }
                 // read both ears, 4x oversampled
                 if ((s & 15) == 0) {
                     for (int ear = 0; ear < 2; ear++) {
@@ -577,37 +712,49 @@ public:
                     }
                 }
                 float y[2];
-                const float* Pf = v.w.p.data(); const float* Uf = v.w.u.data();
                 const float tt = (s + 1) * invN;
                 const float scx = o0[0] + (o1[0] - o0[0]) * tt, scy = o0[1] + (o1[1] - o0[1]) * tt;
                 const float srad = o0[2] + (o1[2] - o0[2]) * tt, swid = o0[3] + (o1[3] - o0[3]) * tt;
                 const float rGs = srad * 0.5f * G;
-                // the water only moves every ADVECT_EVERY steps; read where it WOULD be
-                const float pk = advTable.active() ? (float)v.w.advectCount + blend : 0.f;
-                const float gc = (G - 1) * 0.5f;
-                const bool swirl = advTable.mode == 0;
-                float prc = 1.f, prs = 0.f, pdx = 0.f, pdy = 0.f;
-                if (pk != 0.f) {
-                    if (swirl) { prc = std::cos(pk * advTable.omega); prs = std::sin(pk * advTable.omega); }
-                    else { pdx = -pk * advTable.vx; pdy = -pk * advTable.vy; }
+                // per lane: frames, and where the not-yet-applied current would have moved the water
+                struct LaneRead { const float* P; const float* U; float w, prc, prs, pdx, pdy; bool mv; } ln[2];
+                const int nl = (wB > 0.f) ? 2 : 1;
+                for (int l = 0; l < nl; l++) {
+                    const Water& W = l ? v.w2 : v.w;
+                    LaneRead& L = ln[l];
+                    L.P = W.p.data(); L.U = W.u.data(); L.w = l ? wB : wA;
+                    const float pk = (advTable.active() && !v.held) ? (float)W.advectCount + blend : 0.f;
+                    L.prc = 1.f; L.prs = 0.f; L.pdx = 0.f; L.pdy = 0.f; L.mv = pk != 0.f;
+                    if (L.mv) {
+                        if (swirl) { L.prc = std::cos(pk * advTable.omega); L.prs = std::sin(pk * advTable.omega); }
+                        else { L.pdx = -pk * advTable.vx; L.pdy = -pk * advTable.vy; }
+                    }
                 }
                 const float cG[2][2] = {{worldToGrid(scx - swid), worldToGrid(scy)}, {worldToGrid(scx + swid), worldToGrid(scy)}};
+                const bool needLive = v.heldX < 1.f;
                 for (int ear = 0; ear < 2; ear++) {
                     float* buf = v.firBuf[ear];
                     int wpos = v.firPos;
                     const float rr = rGs * v.rrf[ear];
-                    // water height on this ear's orbit at phase ph (0..1)
+                    // water height on this ear's orbit at phase ph (0..1), blended across lanes
                     auto sample = [&](float ph) {
                         float sn, cs; sincos01(ph, sn, cs);
-                        float gx = cG[ear][0] + rr * cs, gy = cG[ear][1] + rr * sn;
-                        if (pk != 0.f) {
-                            if (swirl) { float px = gx - gc, py = gy - gc; gx = gc + prc * px + prs * py; gy = gc - prs * px + prc * py; }
-                            else { gx += pdx; gy += pdy; }
+                        const float gx0 = cG[ear][0] + rr * cs, gy0 = cG[ear][1] + rr * sn;
+                        float h = 0.f;
+                        for (int l = 0; l < nl; l++) {
+                            const LaneRead& L = ln[l];
+                            float gx = gx0, gy = gy0;
+                            if (L.mv) {
+                                if (swirl) { float px = gx - gc, py = gy - gc; gx = gc + L.prc * px + L.prs * py; gy = gc - L.prs * px + L.prc * py; }
+                                else { gx += L.pdx; gy += L.pdy; }
+                            }
+                            h += L.w * (bilinear(L.P, gx, gy) * (1.f - blend) + bilinear(L.U, gx, gy) * blend);
                         }
-                        return bilinear(Pf, gx, gy) * (1.f - blend) + bilinear(Uf, gx, gy) * blend;
+                        return h;
                     };
                     auto capture = [&](float* t) { for (int i = 0; i < Voice::TAB; i++) t[i] = sample((float)i / Voice::TAB); t[Voice::TAB] = t[0]; };
-                    if (clarity > 0.f && !v.tabInit) {
+                    if (v.holdReq && v.heldX <= holdInc * 1.5f && !v.held) capture(v.holdTab[ear]);
+                    if (clarity > 0.f && !v.tabInit && needLive) {
                         capture(v.tabNew[ear]); std::memcpy(v.tabOld[ear], v.tabNew[ear], sizeof(v.tabOld[ear]));
                         v.lapCount[ear] = 0; v.holdLaps[ear] = 1;
                         if (ear == 1) v.tabInit = true;
@@ -616,25 +763,32 @@ public:
                         v.phase[ear] += v.dph[ear];
                         if (v.phase[ear] >= 1.0) {
                             v.phase[ear] -= 1.0;
-                            if (clarity > 0.f && ++v.lapCount[ear] >= v.holdLaps[ear]) {
+                            if (clarity > 0.f && needLive && ++v.lapCount[ear] >= v.holdLaps[ear]) {
                                 // next snapshot: the waveform glides old -> new over holdLaps cycles.
                                 // Clarity sets how often it refreshes: ~60/s (low) down to ~10/s (full)
                                 std::memcpy(v.tabOld[ear], v.tabNew[ear], sizeof(v.tabOld[ear]));
                                 capture(v.tabNew[ear]);
-                                const float rate = 60.f * std::pow(10.f / 60.f, clarity);
+                                const float rfr = 60.f * std::pow(10.f / 60.f, clarity);
                                 v.lapCount[ear] = 0;
-                                v.holdLaps[ear] = std::max(1, (int)std::lround(f0 / rate));
+                                v.holdLaps[ear] = std::max(1, (int)std::lround(f0 / rfr));
                             }
                         }
                         const float ph = (float)v.phase[ear];
-                        float h = clarity < 1.f ? sample(ph) : 0.f;
-                        if (clarity > 0.f) {
-                            // glide from last lap's snapshot to this lap's across the cycle: pitch stays clean
-                            float x = ph * Voice::TAB; int i = (int)x; float f = x - i;
-                            float a = v.tabOld[ear][i] + (v.tabOld[ear][i + 1] - v.tabOld[ear][i]) * f;
-                            float b = v.tabNew[ear][i] + (v.tabNew[ear][i + 1] - v.tabNew[ear][i]) * f;
-                            const float wgt = ((float)v.lapCount[ear] + ph) / (float)v.holdLaps[ear];
-                            h = h * (1.f - clarity) + (a + (b - a) * wgt) * clarity;
+                        const float x = ph * Voice::TAB; const int ti = (int)x; const float tf = x - ti;
+                        float h = 0.f;
+                        if (needLive) {
+                            h = clarity < 1.f ? sample(ph) : 0.f;
+                            if (clarity > 0.f) {
+                                // glide from last lap's snapshot to this lap's across the cycle: pitch stays clean
+                                float a = v.tabOld[ear][ti] + (v.tabOld[ear][ti + 1] - v.tabOld[ear][ti]) * tf;
+                                float b = v.tabNew[ear][ti] + (v.tabNew[ear][ti + 1] - v.tabNew[ear][ti]) * tf;
+                                const float wgt = ((float)v.lapCount[ear] + ph) / (float)v.holdLaps[ear];
+                                h = h * (1.f - clarity) + (a + (b - a) * wgt) * clarity;
+                            }
+                        }
+                        if (v.heldX > 0.f) {
+                            const float hb = v.holdTab[ear][ti] + (v.holdTab[ear][ti + 1] - v.holdTab[ear][ti]) * tf;
+                            h = h * (1.f - v.heldX) + hb * v.heldX;
                         }
                         buf[wpos] = h; buf[wpos + FIR_TAPS] = h;
                         if (++wpos == FIR_TAPS) wpos = 0;
@@ -647,35 +801,55 @@ public:
                         a2 += fir[t + 2] * win[t + 2]; a3 += fir[t + 3] * win[t + 3];
                     }
                     const float xin = (a0 + a1) + (a2 + a3);
-                    const float yo = v.hp[1][ear].run(v.hp[0][ear].run(xin));
-                    y[ear] = yo;
+                    y[ear] = v.hp[1][ear].run(v.hp[0][ear].run(xin));
                 }
                 v.firPos = (v.firPos + OS) % FIR_TAPS;
                 float g = v.env * velG * volG * OUT_GAIN;
                 outL[s] += y[0] * g;
                 outR[s] += y[1] * g;
+                blockPeak = std::max(blockPeak, std::max(std::fabs(y[0] * g), std::fabs(y[1] * g)));
             }
+            if (!v.active || v.stealing) continue;
+            v.peakLevel = std::max(v.peakLevel, blockPeak);
+            // a quiet tail stops simulating: released, all stones in, no rain, 40 dB under its peak
+            if (!v.gate && !v.loop && v.exitW == 0.f && !v.holdReq && rs.rate <= 0.f && blockPeak < v.peakLevel * 0.01f) {
+                bool allIn = true;
+                for (int i = 0; i < local.nStones; i++) allIn = allIn && v.landed[i] && v.w.npend == 0;
+                if (allIn) { v.holdReq = true; v.heldX = 0.f; }
+            }
+            if (v.held && blockPeak < 1e-6f) { v.active = false; v.env = 0.f; }
         }
-        // steep 35 Hz high-pass (4th order) + soft clip
+        // steep 35 Hz high-pass, then a peak catcher that leaves everything under 0.9 untouched.
+        // (No saturating clipper any more: driving one with the pond's lopsided waves made sub-bass rumble.)
         if (sr != outHpSr) {
-            for (int c = 0; c < 2; c++) { outHp[0][c].highpass(35.0, BW4_Q1, sr); outHp[1][c].highpass(35.0, BW4_Q2, sr); }
+            for (int c = 0; c < 2; c++) { outHp[c][0].highpass(35.0, BW4_Q1, sr); outHp[c][1].highpass(35.0, BW4_Q2, sr); }
             outHpSr = sr;
         }
         for (int s = 0; s < n; s++) {
-            outL[s] = std::tanh(outHp[1][0].run(outHp[0][0].run(outL[s])));
-            outR[s] = std::tanh(outHp[1][1].run(outHp[0][1].run(outR[s])));
+            outL[s] = safety(outHp[0][1].run(outHp[0][0].run(outL[s])));
+            outR[s] = safety(outHp[1][1].run(outHp[1][0].run(outR[s])));
         }
         clock += (uint64_t)n;
         updateDisplay(newest, nActive, n, sr);
     }
 
+    // last-stage peak catcher: untouched below 0.9, never above 1.0 (the post-clip cut can overshoot)
+    static float safety(float x) {
+        const float ax = std::fabs(x);
+        if (ax <= 0.9f) return x;
+        const float y = 0.9f + 0.1f * std::tanh((ax - 0.9f) * 10.f);
+        return x < 0.f ? -y : y;
+    }
+
     // Output gain applied before the soft clip (calibrated with the test renderer).
-    static constexpr float OUT_GAIN = 0.35f;
+    static constexpr float OUT_GAIN = 0.175f;
 
 private:
     struct Shared {
         Shape shape; Water snap; double snapTime = 0;
         Stone stones[MAX_STONES]; float land[MAX_STONES] = {}; int nStones = 0; uint64_t version = 0;
+        RainSpec rain;
+        Water frz; double frzTime = 0; bool frzLanded[MAX_STONES] = {}; int frzSerial = 0;   // re-simulated frozen moment
     };
     Shared shared, local;      // local = audio thread's copy
     uint64_t localVersion = ~0ull;
@@ -689,14 +863,17 @@ private:
     EventQueue<256> queue;
     Voice voices[MAX_VOICES];
     float fir[FIR_TAPS] = {};
-    Biquad outHp[2][2]; double outHpSr = 0;
+    Biquad outHp[2][2]; double outHpSr = 0;   // [channel][stage]
     Wobble wanX, wanY; float wx = 0, wy = 0;
     float sm[4] = {0, 0, 0.3f, 0.04f}; bool orbInit = false;
     AdvectTable advTable;
     uint64_t clock = 0;
     double curSr = 44100.0;
     bool wasFrozen = false, frozenNow = false, haveFrozen = false;
-    Water frozenWater; double frozenTime = 0, frozenBlend = 0; bool frozenLanded[MAX_STONES] = {};
+    Water frozenWater; double frozenTime = 0; bool frozenLanded[MAX_STONES] = {};
+    int frzSerialAudio = 0;
+    std::atomic<int> frzSerialMain{0};       // which freeze the worker should re-simulate
+    std::atomic<double> frzAtMain{0.0};      // ... at this pond time
 
     std::mutex dispLock;
     float disp[DISP * DISP] = {};
@@ -746,6 +923,11 @@ private:
         local.snapTime = shared.snapTime;
         for (int i = 0; i < MAX_STONES; i++) { local.stones[i] = shared.stones[i]; local.land[i] = shared.land[i]; }
         local.nStones = shared.nStones;
+        local.rain = shared.rain;
+        if (frozenNow && haveFrozen && shared.frzSerial == frzSerialAudio) {
+            frozenWater.copyFrom(shared.frz); frozenTime = shared.frzTime;
+            for (int i = 0; i < MAX_STONES; i++) frozenLanded[i] = shared.frzLanded[i];
+        }
         localVersion = shared.version;
         if (!maskInit) { maskCur = local.shape.mask; maskInit = true; }
     }
@@ -781,32 +963,69 @@ private:
         (void)sr;
     }
 
-    // Freeze: grab the water of the most recent note (playing or not) so new notes
-    // play that exact moment instead of the (possibly still flat) start point.
+    // Freeze holds a MOMENT of the pond's life: grab the water of the most recent note (or the
+    // start point). Later changes to stones/shape/medium re-simulate that same moment (worker).
     void captureFrozen() {
         int pick = -1; uint64_t newest = 0;
         for (int i = 0; i < MAX_VOICES; i++)
-            if (voices[i].startedAt > newest && !voices[i].stealing) { newest = voices[i].startedAt; pick = i; }
-        if (pick < 0) { haveFrozen = false; return; }
-        frozenWater.copyFrom(voices[pick].w);
-        frozenTime = voices[pick].pondTime;
-        frozenBlend = voices[pick].stepAcc;
-        for (int i = 0; i < MAX_STONES; i++) frozenLanded[i] = voices[pick].landed[i];
+            if (voices[i].active && voices[i].startedAt > newest && !voices[i].stealing) { newest = voices[i].startedAt; pick = i; }
+        if (pick >= 0) {
+            frozenWater.copyFrom(voices[pick].w);
+            frozenTime = voices[pick].pondTime;
+            for (int i = 0; i < MAX_STONES; i++) frozenLanded[i] = voices[pick].landed[i];
+        } else {
+            frozenWater.copyFrom(local.snap);
+            frozenTime = local.snapTime;
+            for (int i = 0; i < MAX_STONES; i++) frozenLanded[i] = (i < local.nStones) && (local.land[i] <= local.snapTime);
+        }
         haveFrozen = true;
+        frzSerialAudio++;
+        frzAtMain.store(frozenTime);
+        frzSerialMain.store(frzSerialAudio);
+    }
+
+    void stepLane(Voice& v, int lane, const float* mask, const RainSpec& rs) {
+        Water& w = lane ? v.w2 : v.w;
+        double& t = lane ? v.pondTime2 : v.pondTime;
+        bool* landed = lane ? v.landed2 : v.landed;
+        w.step(mask, local.shape, &advTable);
+        t += 1.0 / STEPS_PER_POND_SEC;
+        for (int i = 0; i < local.nStones; i++)
+            if (!landed[i] && t >= local.land[i]) { landed[i] = true; w.startDrop(local.stones[i]); }
+        rainTick(w, t, rs, mask);
+    }
+    void restartLane(Voice& v, int lane) {
+        Water& w = lane ? v.w2 : v.w;
+        w.copyFrom(frozenWater);
+        (lane ? v.pondTime2 : v.pondTime) = frozenTime;
+        bool* landed = lane ? v.landed2 : v.landed;
+        for (int i = 0; i < MAX_STONES; i++) landed[i] = frozenLanded[i];
+    }
+    // the voice's current water keeps playing at full weight while lane 1 starts from the frozen moment
+    void enterLoop(Voice& v) { v.loop = true; v.loopPh = 0.5; v.exitW = 0.f; restartLane(v, 1); }
+    // keep whichever lane is louder in the mix, fade the other out
+    void exitLoop(Voice& v) {
+        float sp = std::sin((float)kPi * (float)v.loopPh), wA = sp * sp;
+        if (wA < 0.5f) {
+            std::swap(v.w, v.w2); std::swap(v.pondTime, v.pondTime2);
+            for (int i = 0; i < MAX_STONES; i++) std::swap(v.landed[i], v.landed2[i]);
+            wA = 1.f - wA;
+        }
+        v.loop = false; v.exitW = 1.f - wA;
     }
 
     void startVoice(Voice& v, uint8_t note, uint8_t vel) {
         if (frozenNow && haveFrozen) {
-            v.w.copyFrom(frozenWater);
-            v.pondTime = frozenTime;
-            v.stepAcc = frozenBlend;
-            for (int i = 0; i < MAX_STONES; i++) v.landed[i] = frozenLanded[i];
+            restartLane(v, 0);
+            v.loop = false; enterLoop(v);
         } else {
             v.w.copyFrom(local.snap);
             v.pondTime = local.snapTime;
-            v.stepAcc = 0.0;
             for (int i = 0; i < MAX_STONES; i++) v.landed[i] = (i < local.nStones) && (local.land[i] <= local.snapTime);
+            v.loop = false;
         }
+        v.stepAcc = 0.0; v.exitW = 0.f;
+        v.peakLevel = 0.f; v.heldX = 0.f; v.holdReq = false; v.held = false;
         v.active = true; v.gate = !v.pendOff; v.pendOff = false; v.stealing = false; v.note = note; v.vel = vel / 127.f;
         v.env = 0.f; v.phase[0] = v.phase[1] = 0.0; v.startedAt = clock + 1;
         std::memset(v.firBuf, 0, sizeof(v.firBuf)); v.firPos = 0;

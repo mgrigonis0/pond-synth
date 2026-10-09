@@ -105,6 +105,10 @@ static void pond_param(t_pond* x, t_symbol* s, long argc, t_atom* argv) {
     else if (!std::strcmp(n, "cmode")) p.cmode = v != 0.f;
     else if (!std::strcmp(n, "cdir")) p.cdir = v;
     else if (!std::strcmp(n, "start")) p.start = v;
+    else if (!std::strcmp(n, "stiff")) p.stiff = v;
+    else if (!std::strcmp(n, "grain")) p.grain = v;
+    else if (!std::strcmp(n, "rain")) p.rain = v;
+    else if (!std::strcmp(n, "drop")) p.drop = v;
     else if (!std::strcmp(n, "nstones")) x->eng->setStoneCount((int)std::lround(v));
     else if (set_stone_field(x, n, v)) {}
     else {
@@ -124,6 +128,7 @@ static void pond_param(t_pond* x, t_symbol* s, long argc, t_atom* argv) {
         else if (!std::strcmp(n, "velamt")) p.velamt = v;
         else if (!std::strcmp(n, "volume")) p.volume = v;
         else if (!std::strcmp(n, "clarity")) p.clarity = v;
+        else if (!std::strcmp(n, "breathe")) p.breathe = v;
         else if (!std::strcmp(n, "display")) x->displayOn = v != 0.f;
         else { object_error((t_object*)x, "unknown message %s", n); return; }
     }
@@ -248,6 +253,7 @@ static const char* kParams[] = {
     "corners", "walls", "visc", "refl", "current", "cmode", "cdir", "start", "nstones",
     "speed", "keytrack", "freeze", "ox", "oy", "osize", "wander", "width", "detune", "drift",
     "attack", "release", "velamt", "volume", "clarity", "display",
+    "breathe", "stiff", "grain", "rain", "drop",
     "s1x", "s1y", "s1h", "s1s", "s1m", "s2x", "s2y", "s2h", "s2s", "s2m",
     "s3x", "s3y", "s3h", "s3s", "s3m", "s4x", "s4y", "s4h", "s4s", "s4m",
 };

@@ -66,6 +66,9 @@ DIALS = [
     ("start", "Start", "Start", 0, 0.0, 4.0, 0.0, 9, 1.0, "%.2f s"),
     ("speed", "Pond Speed", "Speed", 0, 0.1, 4.0, 1.0, 9, 2.0, "%.2fx"),
     ("clarity", "Clarity", "Clarity", 0, 0.0, 100.0, 0.0, 5, 1.0, None),
+    ("breathe", "Breathe", "Breathe", 0, 0.0, 100.0, 30.0, 5, 1.0, None),
+    ("rain", "Rain", "Rain", 0, 0.0, 100.0, 0.0, 5, 1.0, None),
+    ("drop", "Drop Size", "Drop", 0, 0.0, 100.0, 30.0, 5, 1.0, None),
     ("wander", "Wander", "Wander", 0, 0.0, 100.0, 0.0, 5, 1.0, None),
     ("width", "Width", "Width", 0, 0.0, 100.0, 50.0, 5, 1.0, None),
     ("detune", "Detune", "Detune", 0, 0.0, 30.0, 6.0, 9, 1.0, "%.1f ct"),
@@ -84,10 +87,12 @@ TOGGLES = [  # name, longname, short, init, off text, on text
 STONE_DEF = [(0.5, -0.22, 0.55, 0.35, 0.5), (-0.45, 0.3, 0.25, 0.2, 0.85),
              (0.12, 0.55, 0.8, 0.55, 0.3), (-0.3, -0.4, 0.4, 0.3, 0.5)]
 HIDDEN = [  # set by pond.js / pads.js gestures, stored + automatable in Live
-    ("corners", "Corners", "Corners", 0, 3.0, 12.0, 5.0),
+    ("corners", "Corners", "Corners", 1, 3, 12, 5),
     ("walls", "Walls", "Walls", 0, -1.0, 1.0, 0.2),
     ("visc", "Viscosity", "Visc", 0, 0.0, 1.0, 0.25),
     ("refl", "Reflect", "Reflect", 0, 0.0, 1.0, 1.0),
+    ("stiff", "Stiffness", "Stiff", 0, 0.0, 1.0, 0.0),
+    ("grain", "Grain", "Grain", 0, 0.0, 1.0, 0.0),
     ("current", "Current", "Current", 0, -1.0, 1.0, 0.25),
     ("cdir", "Flow Direction", "Flow Dir", 0, -3.1416, 3.1416, 0.0),
     ("ox", "Orbit X", "Orbit X", 0, -1.0, 1.0, 0.12),
@@ -119,16 +124,27 @@ wire(thisdev, 0, initb, 0)
 
 # --------------------------------------------------------------------------- UI
 DEV_H = 169
-pondui = box("jsui", (200, 260, 172, 142), ins=2, outs=1, pres=(4, 4, 172, 142), filename="pond.js",
+# colour code (r, g, b): one accent per section, used by dials, toggles, headers and the jsui views
+C = {
+    "pond": (0.33, 0.78, 0.81), "time": (0.45, 0.66, 0.95), "freeze": (0.64, 0.86, 0.96),
+    "rain": (0.38, 0.80, 0.66), "orbit": (0.71, 0.85, 0.42), "amp": (0.92, 0.53, 0.43),
+}
+def rgba(c, a=1.0):
+    return [c[0], c[1], c[2], a]
+
+POND_W, POND_H = 156, 146
+PADS_X, PADS_W = 4 + POND_W + 6, 96
+pondui = box("jsui", (200, 260, POND_W, POND_H), ins=2, outs=1, pres=(4, 4, POND_W, POND_H), filename="pond.js",
              parameter_enable=0, border=0)
-padsui = box("jsui", (400, 260, 226, 161), ins=1, outs=1, pres=(182, 4, 222, 160), filename="pads.js",
+padsui = box("jsui", (400, 260, PADS_W, 165), ins=1, outs=1, pres=(PADS_X, 2, PADS_W, 165), filename="pads.js",
              parameter_enable=0, border=0)
 wire(rbus, 0, pondui, 0); wire(rbus, 0, padsui, 0)
 wire(pond, 2, pondui, 1)             # frames, live orbit, randomized stones
 wire(initb, 0, pondui, 0); wire(initb, 0, padsui, 0)
 
 # randomize button (momentary) -> pond~ randomize
-rnd = box("live.text", (200, 420, 70, 17), ins=1, outs=2, outtypes=["", ""], pres=(4, 149, 82, 16),
+rnd = box("live.text", (200, 420, 70, 17), ins=1, outs=2, outtypes=["", ""], pres=(4, 152, 62, 15),
+          activebgcolor=rgba(C["pond"], 0.25), activetextcolor=rgba((0.9, 0.92, 0.93)),
           text="Randomize", texton="Randomize", mode=0, varname="Randomize", parameter_enable=1,
           saved_attribute_attributes=valueof("Randomize", "Randomize", 2, 0, 1, 0, unitstyle=9, enum=["off", "on"]))
 rroute = obj("route bang", (200, 445, 70, 22), ins=2, outs=2)
@@ -153,28 +169,59 @@ def bus_out(name, src, x, y, init_bang=True, scale=None):
         wire(initb, 0, src, 0)      # (not for toggles: a bang would flip them)
 
 
-# visible dials: time block + 4x2 knob grid
-pres_pos = {"start": (412, 18), "speed": (458, 18), "clarity": (504, 18)}
-grid = ["wander", "width", "detune", "drift", "attack", "release", "velamt", "volume"]
-for k, n in enumerate(grid):
-    pres_pos[n] = (558 + (k % 4) * 48, 6 + (k // 4) * 80)
+# Two rows of 8 slots to the right of the pads, grouped in coloured sections:
+#   row 1:  TIME  Start Speed [Key] Clarity      | ORBIT  Wander Width Detune Drift
+#   row 2:  FREEZE [Freeze] Breathe | RAIN Rain Drop | AMP  Attack Release Velocity Volume
+SLOT, X0 = 46, PADS_X + PADS_W + 10
+ROW_Y = (18, 104)
+ROWS = [
+    [("time", ["start", "speed", "keytrack", "clarity"]), ("orbit", ["wander", "width", "detune", "drift"])],
+    [("freeze", ["freeze", "breathe"]), ("rain", ["rain", "drop"]), ("amp", ["attack", "release", "velamt", "volume"])],
+]
+SECTION_TITLE = {"time": "TIME", "orbit": "ORBIT", "freeze": "FREEZE", "rain": "RAIN", "amp": "AMP"}
+pres_pos, section_of, headers = {}, {}, []
+for r, row in enumerate(ROWS):
+    nslots = sum(len(names) for _, names in row)
+    gap = (8 * SLOT + 16 - nslots * SLOT) / max(1, len(row) - 1)     # every row ends at the same x
+    x = X0
+    for sec, names in row:
+        headers.append((sec, x, ROW_Y[r] - 14, len(names) * SLOT - 4))
+        for n in names:
+            pres_pos[n] = (x, ROW_Y[r]); section_of[n] = sec
+            x += SLOT
+        x += gap
+DEVICE_W = int(X0 + 8 * SLOT + 16 + 2)
+
 for k, (name, longn, short, ptype, lo, hi, init, ustyle, expo, units) in enumerate(DIALS):
     px, py = pres_pos[name]
+    col = C[section_of[name]]
     d = box("live.dial", (700 + (k % 5) * 90, 80 + (k // 5) * 90, 44, 48), ins=1, outs=2, outtypes=["", "float"],
             pres=(px, py, 44, 48), varname=longn, parameter_enable=1,
+            activedialcolor=rgba(col), activeneedlecolor=rgba(col),
             saved_attribute_attributes=valueof(longn, short, ptype, lo, hi, init, ustyle, expo, units))
     param_obj[name] = d
     bus_out(name, d, 700 + (k % 5) * 90, 135 + (k // 5) * 90, scale=0.01 if ustyle == 5 else None)
 
-# toggles under the time dials
-tog_pres = {"keytrack": (412, 92, 44, 17), "freeze": (458, 92, 44, 17), "display": (90, 149, 40, 16),
-            "cmode": (134, 149, 42, 16)}
+# toggles: Key and Freeze sit in dial slots (centred), View and Swirl/Flow under the pond
+tog_pres = {"display": (70, 152, 40, 15), "cmode": (114, 152, 46, 15)}
+for n in ("keytrack", "freeze"):
+    px, py = pres_pos[n]
+    tog_pres[n] = (px + 2, py + 17, 40, 15)
 for k, (name, longn, short, init, off, on) in enumerate(TOGGLES):
+    col = C[section_of.get(name, "pond")]
     t = box("live.text", (700 + k * 90, 300, 44, 17), ins=1, outs=2, outtypes=["", ""], pres=tog_pres[name],
             text=off, texton=on, mode=1, varname=longn, parameter_enable=1,
+            activebgoncolor=rgba(col), activetextoncolor=rgba((0.08, 0.09, 0.1)),
             saved_attribute_attributes=valueof(longn, short, 2, 0, 1, init, unitstyle=9, enum=["off", "on"]))
     param_obj[name] = t
     bus_out(name, t, 700 + k * 90, 325, init_bang=False)
+
+# section headers: coloured title + a thin rule
+for k, (sec, x, y, w) in enumerate(headers):
+    box("live.comment", (1500, 40 + k * 30, 80, 18), text=SECTION_TITLE[sec], ins=1, outs=0, pres=(x, y - 2, w, 14),
+        textcolor=rgba(C[sec]), fontname="Arial Bold", fontsize=8.5, fontface=1)
+    box("panel", (1600, 40 + k * 30, 80, 2), ins=1, outs=0, pres=(x + 2, y + 11, w - 2, 1),
+        bgcolor=rgba(C[sec], 0.45), mode=0, border=0, rounded=0)
 
 # hidden parameters driven by the pond / pad gestures
 for k, (name, longn, short, ptype, lo, hi, init) in enumerate(HIDDEN):
@@ -192,11 +239,6 @@ wire(padsui, 0, route_ui, 0)
 for k, name in enumerate(hidden_names):
     wire(route_ui, k, param_obj[name], 0)
 
-# section labels
-for txt, rect in (("Time", (412, 4, 60, 14)), ("Orbit", (512, 70, 60, 14)), ("Envelope", (512, 150, 80, 14))):
-    pass  # kept minimal: knob names come from the Live parameter short names
-
-DEVICE_W = 558 + 4 * 48 + 6
 
 patcher = {
     "patcher": {
@@ -209,7 +251,7 @@ patcher = {
         "default_fontsize": 10.0, "default_fontface": 0, "default_fontname": "Arial Bold",
         "gridonopen": 1, "gridsize": [8.0, 8.0], "gridsnaponopen": 1, "objectsnaponopen": 1,
         "statusbarvisible": 2, "toolbarvisible": 1, "boxanimatetime": 500, "enablehscroll": 1,
-        "enablevscroll": 1, "devicewidth": float(DEVICE_W), "description": "Pond synth v0.1",
+        "enablevscroll": 1, "devicewidth": float(DEVICE_W), "description": "Pond synth v0.2",
         "digest": "", "tags": "", "style": "", "subpatcher_template": "",
         "boxes": boxes, "lines": lines,
         "dependency_cache": [

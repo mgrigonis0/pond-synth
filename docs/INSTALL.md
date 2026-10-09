@@ -1,4 +1,4 @@
-# Pond synth v0.1 — install and first test
+# Pond synth v0.2 — install and first test
 
 For Live 11 with Max 8 on a Mac (Intel or Apple Silicon).
 
@@ -67,15 +67,25 @@ On the pond:
 | Drag the curl handle around the rim | **Swirl** mode: whirlpool strength + direction |
 | Drag the arrow handle | **Flow** mode: direction the water flows; further from the centre = faster |
 
-Pads: **Shape** (x = corners, y = walls bent in ↔ bulging) and **Medium**
-(x = water ↔ syrup, y = absorb ↔ reflect).
+Pads (stacked, next to the pond):
+
+- **Shape:** x = corners (3 to 12, whole numbers), y = walls bent in ↔ bulging.
+- **Medium:** x = water ↔ near solid, y = absorb ↔ reflect.
+- **Material:** x = water ↔ stiff plate (cleaner pitch, colour that moves more), y = even ↔ grained like wood.
 
 **Swirl / Flow** (under the pond) picks the current type.
 
-Knobs: Start, Speed, Key (pond speed follows the note), Freeze, **Clarity** (0% = alive,
-shimmering; 100% = clean, steady pitch even at high Speed), Wander, Width, Detune,
-Drift, Attack, Release, Velocity, Volume. **Randomize** gives fresh stones; **View** turns
-the moving water display on and off.
+Knobs, colour-coded by section:
+
+| Section | Controls |
+|---|---|
+| **Time** | Start, Speed, Key (pond speed follows the note), Clarity (0% = alive and shimmering, 100% = clean, steady pitch even at high Speed) |
+| **Orbit** | Wander, Width, Detune, Drift |
+| **Freeze** | Freeze holds a moment of the pond's life. While frozen, changing stones, shape, medium or material re-runs the pond to that same moment, so you hear every change. Breathe: 0 = nearly still, up = the water keeps moving around that moment |
+| **Rain** | Rain (how many drops, 0 = off) and Drop (drop size). Rain keeps the pond moving, so notes sustain |
+| **Amp** | Attack, Release, Velocity, Volume |
+
+**Randomize** gives fresh stones. **View** turns the moving water display on and off.
 
 Every control is a Live parameter, so it's saved with your set and can be automated.
 
@@ -85,6 +95,8 @@ Every control is a Live parameter, so it's saved with your set and can be automa
   (notes already playing keep their pond).
 - No loops or ping-pong yet (v0.2).
 - 8 voices. When a 9th note comes in, the oldest note fades out over ~15 ms first.
-- CPU (test machine): about 5% of one core per note; an 8-note chord ~36%.
-  Speed x key tracking is capped at 4x (more water steps = more CPU); an 8-note
-  chord at maximum Speed is ~70%.
+- CPU (test machine): about 4-5% of one core per note; an 8-note chord ~25%.
+  Speed x key tracking is capped at 4x (more water steps = more CPU).
+  Release tails that are 40 dB under their peak stop simulating and play on from a held
+  snapshot, so long releases cost far less. Freeze and Material at the plate end cost about
+  twice as much per note.

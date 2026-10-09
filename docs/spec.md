@@ -1,6 +1,6 @@
 # Pond synth — spec (working title)
 
-Max for Live instrument. Status: v0.1 build in progress.
+Max for Live instrument. Status: v0.2.
 Target: Live 11, Max 8.6.4, Intel Mac (the build also covers Apple Silicon).
 Code: github.com/mgrigonis0/pond-synth
 Last updated: 2026-10-09.
@@ -195,4 +195,15 @@ Second round (same day):
 - **Brightness restored:** Reflect defaults to 100% and absorption is gentler at middle settings.
 - **Rumble:** each voice high-passes at 0.7 × its note (4th order), plus a 35 Hz 4th-order cut on the output.
 
-Still open: loops (pond-life strip with start flag, loop brackets, one-shot / forward / back-and-forth).
+## 12. v0.2 (2026-10-09)
+
+- **Rumble, the real cause:** the output soft-clipper made sub-bass on the pond's lopsided waves (the louder, the more: −16 dB at +6 dB volume on C1). The saturating clipper is gone: a steep 35 Hz cut, then a peak catcher that leaves everything under 0.9 untouched. Sub-bass on C1 is now about −63 dB. The output is 6 dB quieter by default, to leave headroom.
+- **Freeze holds a moment, not a snapshot.** Changing stones, shape, medium, material or rain while frozen re-runs the pond to that moment (up to 8 pond-seconds) on the worker thread.
+- **Breathe** (new knob): the frozen moment plays as a loop of two crossfaded pond copies (each restarts while silent), 0.03 to 0.63 pond-seconds long. No clicks were measured.
+- **Long-release CPU:** a releasing note that's 40 dB under its peak, with all stones landed and no rain, crossfades over 50 ms into a held snapshot and stops simulating. Test (8-note chords every second, 4 s release): 35 % → 22 % of one core.
+- **Material pad** (new): stiffness trades wave speed for plate-like dispersion while holding the fastest grid mode, so it costs no stability. At full stiffness the halo narrows (cleaner pitch) and the colour moves more (4.8 → 8.5). Grain makes waves faster along one axis, like wood (timbre change about 8 dB). A "drum-skin tension" option was tried and cut: too subtle. A true metal plate would need several times the CPU at this grid.
+- **Rain** (new): a deterministic stream of small drops (1.5 to 375 per pond-second), lighter as it gets denser.
+- **Corners** are whole numbers only.
+- **UI:** the three pads (Shape, Medium, Material) are small and stacked. Knobs are in colour-coded sections: Time, Orbit, Freeze, Rain, Amp. The orbit is drawn in the Orbit colour.
+
+Still open: loops (pond-life strip with start flag, loop brackets, one-shot / forward / back-and-forth). Default sound is dark (mostly harmonics 1–3 at the default orbit): worth a look.

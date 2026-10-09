@@ -71,10 +71,8 @@ function boundaryFor(m, walls) {
     return out;
 }
 function rebuildShape() {
-    var c = Math.max(3, Math.min(12, P.corners)), m0 = Math.floor(c), m1 = Math.min(12, m0 + 1), f = c - m0;
-    var A = boundaryFor(m0, P.walls), B = boundaryFor(m1, P.walls);
-    R = [];
-    for (var b = 0; b < ANG; b++) R[b] = A[b] + (B[b] - A[b]) * f;
+    var c = Math.round(Math.max(3, Math.min(12, P.corners)));     // whole corner counts (as the engine)
+    R = boundaryFor(c, P.walls);
     fitDirty = true;
 }
 function radiusAt(th) {
@@ -238,12 +236,12 @@ function paint() {
     for (var e = 0; e < 2; e++) {
         var C = toScreen(v, ox + (e ? ow : -ow), oy);
         if (atCap) mgraphics.set_source_rgba(0.91, 0.53, 0.35, e ? 0.6 : 0.95);
-        else mgraphics.set_source_rgba(0.91, 0.92, 0.93, e ? 0.5 : 0.9);
+        else mgraphics.set_source_rgba(0.71, 0.85, 0.42, e ? 0.55 : 0.95);   // orbit = lime (device colour code)
         mgraphics.set_line_width(1);
         ellipseAt(C[0], C[1], orad * v.sc, orad * v.sc * T); mgraphics.stroke();
     }
     var OC = toScreen(v, P.ox, P.oy), k = 4;
-    mgraphics.set_source_rgba(0.91, 0.92, 0.93, 1); mgraphics.set_line_width(1.4);
+    mgraphics.set_source_rgba(0.78, 0.9, 0.55, 1); mgraphics.set_line_width(1.4);
     mgraphics.move_to(OC[0] - k, OC[1]); mgraphics.line_to(OC[0] + k, OC[1]);
     mgraphics.move_to(OC[0], OC[1] - k * T); mgraphics.line_to(OC[0], OC[1] + k * T); mgraphics.stroke();
     var RH = toScreen(v, P.ox + orbitRadius(), P.oy);

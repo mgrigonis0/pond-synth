@@ -1,6 +1,6 @@
 // Offline test renderer for the pond engine (no Max needed).
 //   render out.wav [scenario]
-// Scenarios: melody (default), chord, sweep, cpu
+// Scenarios: melody (default), chord, sweep, cpu, relcpu, rainN, stiffN, grainN (N = 0..100), clarN, ...
 #include "../source/engine/pond_engine.h"
 #include <chrono>
 #include <cstdio>
@@ -76,6 +76,24 @@ int main(int argc, char** argv) {
     } else if (sc.rfind("clar", 0) == 0) {
         // clarity test: Speed 3, one note; scenario name clar0 / clar50 / clar100
         eng.prm.speed = 3.f; eng.prm.clarity = std::stof(sc.substr(4)) / 100.f; eng.rebuild();
+        evs.push_back({0.1, 48, 100}); evs.push_back({3.0, 48, 0});
+        len = 3.5;
+    } else if (sc == "relcpu") {
+        // long release: an 8-note chord every second, 4 s release (tails pile up)
+        eng.prm.release = 4000.f; eng.rebuild();
+        int ch[2][4] = {{48, 55, 60, 64}, {50, 57, 62, 65}};
+        for (int k = 0; k < 6; k++) for (int nn : ch[k % 2]) { evs.push_back({0.1 + k * 1.0, nn, 100}); evs.push_back({0.6 + k * 1.0, nn, 0}); }
+        len = 12.0;
+    } else if (sc.rfind("rain", 0) == 0) {
+        eng.prm.rain = std::stof(sc.substr(4)) / 100.f; eng.prm.drop = 0.3f; eng.rebuild();
+        evs.push_back({0.1, 48, 100}); evs.push_back({4.0, 48, 0});
+        len = 4.5;
+    } else if (sc.rfind("stiff", 0) == 0) {
+        eng.prm.stiff = std::stof(sc.substr(5)) / 100.f; eng.rebuild();
+        evs.push_back({0.1, 48, 100}); evs.push_back({3.0, 48, 0});
+        len = 3.5;
+    } else if (sc.rfind("grain", 0) == 0) {
+        eng.prm.grain = std::stof(sc.substr(5)) / 100.f; eng.rebuild();
         evs.push_back({0.1, 48, 100}); evs.push_back({3.0, 48, 0});
         len = 3.5;
     } else if (sc == "cpu") {
