@@ -40,9 +40,9 @@ A simulated pond of water. **Stones** disturb it, an **orbit** listens to it, an
 |---|---|
 | Shape: corners | 3 (triangle) up to 12 (near-circle), crossfading between whole numbers |
 | Shape: walls | concave (bent in) ↔ straight ↔ bulging |
-| Reflectivity | walls absorb ↔ walls reflect |
-| Viscosity | water (bright, busy) ↔ syrup (dark, calm) |
-| Current | whirlpool strength and direction. Stronger gives a cleaner pitch *and* more timbre movement |
+| Reflectivity | walls absorb ↔ reflect: ring time ~1 s (0%) to ~8 s (100%) on straight walls |
+| Viscosity | water → oil → syrup → jelly → near-solid (stiffens and dies within ~1 s) |
+| Current | **Swirl** (whirlpool, strength + direction) or **Flow** (water moving one way: direction + speed, ripples carried downstream) |
 | Pond speed | how fast the water's clock runs, separate from pitch. Slow = clean, normal = alive halo, fast = pitch breaks up |
 | Key tracking | pond speed follows the note (C3 = 1×), so every note gets the same amount of character. On by default |
 
@@ -76,7 +76,7 @@ All stones are released together, and physics decides the timing. A much stronge
 | Loop region + mode | start/end markers; one-shot / forward / ping-pong | v0.2 |
 
 ### Playing
-- 4 voices, oldest note stolen first
+- 8 voices, oldest note stolen first (it fades out over ~15 ms)
 - Amp envelope: attack and release (the pond's own decay continues while the key is held)
 - Velocity → volume only
 - Drift: micro-instability (slow pitch and orbit wobble)
@@ -169,3 +169,23 @@ Later (v0.2+): loops and ping-pong (snapshot + re-simulate for reverse), pop-out
 **Parked:** output section (tone, reverb), drip (repeating stone), "click → wash body," taste-learning randomizer.
 
 **Open:** wind with real speed and direction; nonlinear water (the only physics change left that could make stones change color); dispersion; Windows build.
+
+---
+
+## 11. Changes after the first Live test (2026-10-09)
+
+From the first test in Live 11 / Max 8.6.4 on the Intel Mac:
+
+- **Constant clicky jitter:** the whirlpool turned the water in jumps (~190/s). The orbit now reads the pending rotation, so it's smooth. Orbit moves and wander glide per sample.
+- **Stone landings** spread over ~8 ms; **voice stealing** fades over ~15 ms.
+- **8 voices** (was 4).
+- **Viscosity** extended to near-solid (just below the simulation's stability limit, plus drag at the top).
+- **Reflections that wouldn't stop:** decay was far too slow and the absorbing walls barely worked. The pond now loses half its amplitude per pond-second; walls absorb via friction in a 20-cell band.
+- **Boom:** each voice high-passes at 0.6 × its fundamental (below-note energy −5 dB → about −30 dB).
+- **Pond view** fits and centres the pond and stones, adaptive tilt 0.5–0.7.
+- **Freeze** captures the current water; notes played while frozen use it.
+- **Flow current mode** added next to the whirlpool.
+- **CPU:** Speed × key tracking capped at 4×.
+- Percentage knobs display 0–100%.
+
+Still open: loops (pond-life strip with start flag, loop brackets, one-shot / forward / back-and-forth).
