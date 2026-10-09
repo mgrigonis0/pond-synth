@@ -78,6 +78,7 @@ TOGGLES = [  # name, longname, short, init, off text, on text
     ("keytrack", "Key Tracking", "Key", 1, "Key", "Key"),
     ("freeze", "Freeze", "Freeze", 0, "Freeze", "Freeze"),
     ("display", "Pond View", "View", 1, "View", "View"),
+    ("cmode", "Current Mode", "Current", 0, "Swirl", "Flow"),
 ]
 STONE_DEF = [(0.5, -0.22, 0.55, 0.35, 0.5), (-0.45, 0.3, 0.25, 0.2, 0.85),
              (0.12, 0.55, 0.8, 0.55, 0.3), (-0.3, -0.4, 0.4, 0.3, 0.5)]
@@ -87,6 +88,7 @@ HIDDEN = [  # set by pond.js / pads.js gestures, stored + automatable in Live
     ("visc", "Viscosity", "Visc", 0, 0.0, 1.0, 0.25),
     ("refl", "Reflect", "Reflect", 0, 0.0, 1.0, 0.8),
     ("current", "Current", "Current", 0, -1.0, 1.0, 0.25),
+    ("cdir", "Flow Direction", "Flow Dir", 0, -3.1416, 3.1416, 0.0),
     ("ox", "Orbit X", "Orbit X", 0, -1.0, 1.0, 0.12),
     ("oy", "Orbit Y", "Orbit Y", 0, -1.0, 1.0, -0.1),
     ("osize", "Orbit Size", "Orbit Sz", 0, 0.0, 1.0, 0.4),
@@ -164,7 +166,8 @@ for k, (name, longn, short, ptype, lo, hi, init, ustyle, expo, units) in enumera
     bus_out(name, d, 700 + (k % 5) * 90, 135 + (k // 5) * 90, scale=0.01 if ustyle == 5 else None)
 
 # toggles under the time dials
-tog_pres = {"keytrack": (412, 92, 44, 17), "freeze": (458, 92, 44, 17), "display": (90, 149, 40, 16)}
+tog_pres = {"keytrack": (412, 92, 44, 17), "freeze": (458, 92, 44, 17), "display": (90, 149, 40, 16),
+            "cmode": (134, 149, 42, 16)}
 for k, (name, longn, short, init, off, on) in enumerate(TOGGLES):
     t = box("live.text", (700 + k * 90, 300, 44, 17), ins=1, outs=2, outtypes=["", ""], pres=tog_pres[name],
             text=off, texton=on, mode=1, varname=longn, parameter_enable=1,

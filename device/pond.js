@@ -11,7 +11,8 @@
 //   double-click water ...................... add a stone (max 4)
 //   drag a stone off the pond ............... remove it (one always stays)
 //   drag the orbit's cross .................. where you listen; edge dot = orbit size
-//   drag the curl handle around the rim ..... current strength + direction
+//   whirlpool: drag the curl handle around the rim ... strength + direction
+//   flow: drag the arrow handle .................... direction; further from centre = faster
 
 inlets = 2;
 outlets = 1;
@@ -22,7 +23,7 @@ mgraphics.autofill = 0;
 var T = 0.55;                // tilt (vertical squash)
 var MAXST = 4;
 var P = {
-    corners: 5, walls: 0.2, visc: 0.25, refl: 0.8, current: 0.25,
+    corners: 5, walls: 0.2, visc: 0.25, refl: 0.8, current: 0.25, cmode: 0, cdir: 0,
     ox: 0.12, oy: -0.1, osize: 0.4, width: 0.5, nstones: 3, display: 1
 };
 var stones = [
@@ -94,6 +95,16 @@ function orbitCap(x, y) { return Math.max(0.04, wallDist(x, y) - P.width * 0.08 
 function orbitRadius() { var cap = orbitCap(P.ox, P.oy); return 0.04 + P.osize * (cap - 0.04); }
 function stoneRingR(st) { var sigma = 0.8 + Math.pow(st.s, 1.5) * 11; return 2 * sigma * 2 / 108; }
 
+// current handle: whirlpool = on the rim by strength; flow = along the flow direction
+function handleWorld() {
+    if (P.cmode == 1) {
+        var r = 0.12 + 0.68 * Math.abs(P.current), sg = P.current >= 0 ? 1 : -1;
+        return [sg * r * Math.cos(P.cdir), sg * r * Math.sin(P.cdir)];
+    }
+    var ca = -Math.PI / 2 + P.current * Math.PI * 0.9;
+    return [0.8 * Math.cos(ca), 0.8 * Math.sin(ca)];
+}
+
 // ---------------- screen mapping ----------------
 // Fit the actual pond + stones (+ the curl handle) into the box, centred, with a small
 // margin. Cached: refitted when the shape or stone positions change, never mid-drag.
@@ -111,8 +122,8 @@ function boundsFor(t) {
         add(st.x - 0.06, st.y * t - MAXSTEM - 0.07);
         add(st.x + 0.06, st.y * t);
     }
-    var ca = -Math.PI / 2 + P.current * Math.PI * 0.9;
-    add(0.8 * Math.cos(ca), 0.8 * Math.sin(ca) * t);
+    var hw = handleWorld();
+    add(hw[0], hw[1] * t);
     return [minx, maxx, miny, maxy];
 }
 function computeFit(w, h) {
@@ -188,7 +199,20 @@ function paint() {
     var c = P.current, dir = c >= 0 ? 1 : -1;
     mgraphics.set_source_rgba(0.81, 0.91, 0.93, 0.12 + Math.abs(c) * 0.6);
     mgraphics.set_line_width(1);
-    for (var j = 0; j < 3; j++) {
+    if (P.cmode == 1) {                        // flow: parallel arrows across the pond
+        var fx = dir * Math.cos(P.cdir), fy = dir * Math.sin(P.cdir), nx = -fy, ny = fx;
+        for (var j2 = -2; j2 <= 2; j2++) {
+            for (var r2 = -1; r2 <= 1; r2 += 2) {
+                var bx = nx * j2 * 0.28 + fx * r2 * 0.3, by = ny * j2 * 0.28 + fy * r2 * 0.3;
+                if (!inside(bx, by)) continue;
+                var A0 = toScreen(v, bx - fx * 0.12, by - fy * 0.12), A1 = toScreen(v, bx + fx * 0.12, by + fy * 0.12);
+                var H1 = toScreen(v, bx + fx * 0.06 + nx * 0.05, by + fy * 0.06 + ny * 0.05), H2 = toScreen(v, bx + fx * 0.06 - nx * 0.05, by + fy * 0.06 - ny * 0.05);
+                mgraphics.move_to(A0[0], A0[1]); mgraphics.line_to(A1[0], A1[1]);
+                mgraphics.move_to(H1[0], H1[1]); mgraphics.line_to(A1[0], A1[1]); mgraphics.line_to(H2[0], H2[1]);
+                mgraphics.stroke();
+            }
+        }
+    } else for (var j = 0; j < 3; j++) {
         var a0 = j * 2 * Math.PI / 3 + 0.4, a1 = a0 + dir * 0.75;
         for (var q = 0; q <= 10; q++) {
             var a = a0 + (a1 - a0) * q / 10, pp = toScreen(v, 0.6 * Math.cos(a), 0.6 * Math.sin(a));
@@ -241,8 +265,13 @@ function paint() {
         }
     }
 
-    // curl handle on the rim
-    var ca = -Math.PI / 2 + c * Math.PI * 0.9, CP = toScreen(v, 0.8 * Math.cos(ca), 0.8 * Math.sin(ca));
+    // current handle (whirlpool: on the rim; flow: along the flow, with a line from the centre)
+    var hw0 = handleWorld(), CP = toScreen(v, hw0[0], hw0[1]);
+    if (P.cmode == 1) {
+        var C0 = toScreen(v, 0, 0);
+        mgraphics.set_source_rgba(0.81, 0.91, 0.93, 0.6); mgraphics.set_line_width(1);
+        mgraphics.move_to(C0[0], C0[1]); mgraphics.line_to(CP[0], CP[1]); mgraphics.stroke();
+    }
     mgraphics.set_source_rgba(0.15, 0.16, 0.18, 1); ellipseAt(CP[0], CP[1], 4.5, 4.5); mgraphics.fill();
     mgraphics.set_source_rgba(0.81, 0.91, 0.93, 1); mgraphics.set_line_width(1); ellipseAt(CP[0], CP[1], 4.5, 4.5); mgraphics.stroke();
 
@@ -269,7 +298,7 @@ function hitTest(x, y) {
         var st = stones[i], L = toScreen(v, st.x, st.y), top = L[1] - stemLen(v, st);
         if (dist(x, y, L[0], top) < 7) return { kind: "ball", i: i };
     }
-    var ca = -Math.PI / 2 + P.current * Math.PI * 0.9, CP = toScreen(v, 0.8 * Math.cos(ca), 0.8 * Math.sin(ca));
+    var hwh = handleWorld(), CP = toScreen(v, hwh[0], hwh[1]);
     if (dist(x, y, CP[0], CP[1]) < 7) return { kind: "curl" };
     for (i = P.nstones - 1; i >= 0; i--) {
         var s3 = stones[i], L3 = toScreen(v, s3.x, s3.y), rr = stoneRingR(s3) * v.sc;
@@ -326,6 +355,10 @@ function ondrag(x, y, but, cmd, shift, capslock, option, ctrl) {
     } else if (drag.kind === "radius") {
         var cap = orbitCap(P.ox, P.oy), r = dist(w[0], w[1], P.ox, P.oy);
         send("osize", clamp((r - 0.04) / Math.max(0.001, cap - 0.04), 0, 1)); live.have = false;
+    } else if (drag.kind === "curl" && P.cmode == 1) {
+        var len = Math.sqrt(w[0] * w[0] + w[1] * w[1]);
+        send("cdir", Math.atan2(w[1], w[0]));
+        send("current", clamp((len - 0.12) / 0.68, 0, 1));
     } else if (drag.kind === "curl") {
         var a = Math.atan2(w[1], w[0]) + Math.PI / 2; if (a > Math.PI) a -= 2 * Math.PI;
         send("current", clamp(a / (Math.PI * 0.9), -1, 1));
@@ -361,7 +394,7 @@ function setParam(name, val, forward) {
     if (P.hasOwnProperty(name)) {
         P[name] = val;
         if (name === "corners" || name === "walls") rebuildShape();
-        if (name === "nstones" || name === "current") fitDirty = true;
+        if (name === "nstones" || name === "current" || name === "cmode" || name === "cdir") fitDirty = true;
         if (name === "ox" || name === "oy" || name === "osize" || name === "width") live.have = false;
         if (forward) outlet(0, name, val);
     }

@@ -65,6 +65,14 @@ int main(int argc, char** argv) {
         evs.push_back({2.0, 55, 100}); evs.push_back({3.0, 55, 0});
         evs.push_back({3.5, 43, 100}); evs.push_back({4.5, 43, 0});
         len = 5.5;
+    } else if (sc == "flow" || sc == "swirl") {
+        eng.prm.cmode = sc == "flow" ? 1 : 0; eng.prm.current = 0.6f; eng.prm.cdir = 0.7f; eng.rebuild();
+        evs.push_back({0.1, 48, 100}); evs.push_back({3.0, 48, 0});
+        len = 4.0;
+    } else if (sc == "speed4") {
+        eng.prm.speed = 4.f; eng.rebuild();
+        for (int nn : {48, 55, 60, 64, 67, 72, 76, 79}) { evs.push_back({0.1, nn, 100}); evs.push_back({4.0, nn, 0}); }
+        len = 5.0;
     } else if (sc == "cpu") {
         // worst case: 4 high notes, key tracking at its 4x cap, strong current
         eng.prm.current = 0.8f; eng.prm.speed = 1.f; eng.rebuild();

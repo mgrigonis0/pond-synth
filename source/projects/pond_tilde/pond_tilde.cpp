@@ -102,6 +102,8 @@ static void pond_param(t_pond* x, t_symbol* s, long argc, t_atom* argv) {
     else if (!std::strcmp(n, "visc")) p.visc = v;
     else if (!std::strcmp(n, "refl")) p.refl = v;
     else if (!std::strcmp(n, "current")) p.current = v;
+    else if (!std::strcmp(n, "cmode")) p.cmode = v != 0.f;
+    else if (!std::strcmp(n, "cdir")) p.cdir = v;
     else if (!std::strcmp(n, "start")) p.start = v;
     else if (!std::strcmp(n, "nstones")) x->eng->setStoneCount((int)std::lround(v));
     else if (set_stone_field(x, n, v)) {}
@@ -242,7 +244,7 @@ static void pond_free(t_pond* x) {
 }
 
 static const char* kParams[] = {
-    "corners", "walls", "visc", "refl", "current", "start", "nstones",
+    "corners", "walls", "visc", "refl", "current", "cmode", "cdir", "start", "nstones",
     "speed", "keytrack", "freeze", "ox", "oy", "osize", "wander", "width", "detune", "drift",
     "attack", "release", "velamt", "volume", "display",
     "s1x", "s1y", "s1h", "s1s", "s1m", "s2x", "s2y", "s2h", "s2s", "s2m",

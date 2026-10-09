@@ -30,6 +30,8 @@ constexpr int NCELLS = G * G;
 constexpr double STEPS_PER_POND_SEC = 1500.0;  // water clock at speed 1 (C3)
 constexpr float C2 = 0.2f;             // wave speed^2 (stable < 0.5)
 constexpr int MAX_STONES = 4;
+constexpr float FLOW_MAX = 0.2f;       // flow current at full strength: cells per pond step (~2.8 pond widths per pond-second)
+constexpr float MAX_POND_RATE = 4.f;   // cap on Speed x key tracking (water steps = CPU)
 constexpr double POND_LOSS = 0.5;      // amplitude kept per pond-second with hard walls (-60 dB in ~10 pond-s)
 constexpr float SPONGE_CELLS = 20.f;   // width of the absorbing band along the walls
 constexpr float SPONGE_MAX = 0.35f;    // friction at the wall when Reflect = 0
@@ -50,6 +52,8 @@ struct Stone {
 struct Params {
     // pond
     std::atomic<float> corners{5.f}, walls{0.2f}, visc{0.25f}, refl{0.8f}, current{0.25f};
+    std::atomic<int> cmode{0};            // 0 = whirlpool, 1 = flow (one direction to another)
+    std::atomic<float> cdir{0.f};         // flow direction, radians (0 = towards +x)
     // time
     std::atomic<float> speed{1.f}, start{0.f};
     std::atomic<int> keytrack{1}, freeze{0};
@@ -176,17 +180,27 @@ inline bool insidePond(const std::array<float, ANG>& R, float x, float y) {
 // Whirlpool rotation as a precomputed gather (semi-Lagrangian, bilinear).
 constexpr int ADVECT_EVERY = 8;
 struct AdvectTable {
-    float omega = 1e9f;                 // per-step angle this table was built for
+    // mode 0 = whirlpool (omega: per-step angle), 1 = flow (vx, vy: cells per step)
+    int mode = 0; float omega = 1e9f, vx = 0.f, vy = 0.f;
     std::vector<int> idx = std::vector<int>(NCELLS, -1);
     std::vector<float> fx = std::vector<float>(NCELLS, 0.f), fy = std::vector<float>(NCELLS, 0.f);
-    bool active() const { return std::fabs(omega) > 1e-7f; }
-    void build(float om) {
-        omega = om;
+    bool active() const { return mode == 0 ? std::fabs(omega) > 1e-7f : (std::fabs(vx) + std::fabs(vy)) > 1e-6f; }
+    bool same(int m, float a, float b, float c) const { return m == mode && a == omega && b == vx && c == vy; }
+    // where a point sits after `k` (fractional) steps of not-yet-applied motion
+    void pending(float k, float gc, float& x, float& y) const {
+        if (mode == 0) {
+            float th = k * omega, c = std::cos(th), s = std::sin(th), px = x - gc, py = y - gc;
+            x = gc + c * px + s * py; y = gc - s * px + c * py;
+        } else { x -= k * vx; y -= k * vy; }
+    }
+    void build(int m, float om, float fvx, float fvy) {
+        mode = m; omega = om; vx = fvx; vy = fvy;
         const float a = om * ADVECT_EVERY, ca = std::cos(a), sa = std::sin(a), c = (G - 1) * 0.5f;
         for (int y = 0; y < G; y++)
             for (int x = 0; x < G; x++) {
-                int i = y * G + x; float dx = x - c, dy = y - c;
-                float sx = c + ca * dx + sa * dy, sy = c - sa * dx + ca * dy;
+                int i = y * G + x; float sx, sy;
+                if (m == 0) { float dx = x - c, dy = y - c; sx = c + ca * dx + sa * dy; sy = c - sa * dx + ca * dy; }
+                else { sx = x - fvx * ADVECT_EVERY; sy = y - fvy * ADVECT_EVERY; }   // flow: water arrives from upstream
                 int x0 = (int)std::floor(sx), y0 = (int)std::floor(sy);
                 if (x < 1 || y < 1 || x >= G - 1 || y >= G - 1 || x0 < 0 || y0 < 0 || x0 >= G - 1 || y0 >= G - 1) { idx[i] = -1; continue; }
                 idx[i] = y0 * G + x0; fx[i] = sx - x0; fy[i] = sy - y0;
@@ -426,7 +440,7 @@ public:
         }
         double start = std::clamp((double)prm.start.load(), 0.0, 8.0);
         long steps = (long)(start * STEPS_PER_POND_SEC);
-        AdvectTable adv; adv.build(omegaFor(prm.current.load()));
+        AdvectTable adv; { CurrentSpec c = currentSpec(); adv.build(c.mode, c.omega, c.vx, c.vy); }
         bool landed[MAX_STONES] = {};
         float lt[MAX_STONES] = {};
         landingTimes(st, n, lt);
@@ -478,8 +492,7 @@ public:
         frozenNow = frozen;
         const bool keytrack = prm.keytrack.load() != 0;
         const float speedK = std::clamp(prm.speed.load(), 0.f, 4.f);
-        const float omega = omegaFor(prm.current.load());
-        if (omega != advTable.omega) advTable.build(omega);
+        { CurrentSpec c = currentSpec(); if (!advTable.same(c.mode, c.omega, c.vx, c.vy)) advTable.build(c.mode, c.omega, c.vx, c.vy); }
         const float width = std::clamp(prm.width.load(), 0.f, 1.f) * 0.08f;
         const float detune = std::clamp(prm.detune.load(), 0.f, 50.f);
         const float drift = std::clamp(prm.drift.load(), 0.f, 1.f);
@@ -514,8 +527,9 @@ public:
             nActive++;
             if (v.startedAt >= newestT) { newestT = v.startedAt; newest = vi; }
             const float f0 = 440.f * std::pow(2.f, (v.note - 69) / 12.f);
-            const float key = keytrack ? std::min(4.f, f0 / 130.8128f) : 1.f;
-            const double stepsPerSample = frozen ? 0.0 : STEPS_PER_POND_SEC * speedK * key / sr;
+            const float key = keytrack ? f0 / 130.8128f : 1.f;
+            const float rate = std::min(MAX_POND_RATE, speedK * key);       // CPU grows with this, so it's capped
+            const double stepsPerSample = frozen ? 0.0 : STEPS_PER_POND_SEC * rate / sr;
             const float velG = (1.f - velAmt) + velAmt * v.vel;
             for (int s = 0; s < n; s++) {
                 // envelope
@@ -548,9 +562,15 @@ public:
                 const float scx = o0[0] + (o1[0] - o0[0]) * tt, scy = o0[1] + (o1[1] - o0[1]) * tt;
                 const float srad = o0[2] + (o1[2] - o0[2]) * tt, swid = o0[3] + (o1[3] - o0[3]) * tt;
                 const float rGs = srad * 0.5f * G;
-                // the water only turns every ADVECT_EVERY steps; read where it WOULD be
-                const float th = ((float)v.w.advectCount + blend) * omega;
-                const float rc = std::cos(th), rs = std::sin(th), gc = (G - 1) * 0.5f;
+                // the water only moves every ADVECT_EVERY steps; read where it WOULD be
+                const float pk = advTable.active() ? (float)v.w.advectCount + blend : 0.f;
+                const float gc = (G - 1) * 0.5f;
+                const bool swirl = advTable.mode == 0;
+                float prc = 1.f, prs = 0.f, pdx = 0.f, pdy = 0.f;
+                if (pk != 0.f) {
+                    if (swirl) { prc = std::cos(pk * advTable.omega); prs = std::sin(pk * advTable.omega); }
+                    else { pdx = -pk * advTable.vx; pdy = -pk * advTable.vy; }
+                }
                 const float cG[2][2] = {{worldToGrid(scx - swid), worldToGrid(scy)}, {worldToGrid(scx + swid), worldToGrid(scy)}};
                 for (int ear = 0; ear < 2; ear++) {
                     float* buf = v.firBuf[ear];
@@ -559,8 +579,11 @@ public:
                         v.phase[ear] += v.dph[ear]; if (v.phase[ear] >= 1.0) v.phase[ear] -= 1.0;
                         float sn, cs; sincos01((float)v.phase[ear], sn, cs);
                         const float rr = rGs * v.rrf[ear];
-                        float px = cG[ear][0] + rr * cs - gc, py = cG[ear][1] + rr * sn - gc;
-                        float gx = gc + rc * px + rs * py, gy = gc - rs * px + rc * py;
+                        float gx = cG[ear][0] + rr * cs, gy = cG[ear][1] + rr * sn;
+                        if (pk != 0.f) {
+                            if (swirl) { float px = gx - gc, py = gy - gc; gx = gc + prc * px + prs * py; gy = gc - prs * px + prc * py; }
+                            else { gx += pdx; gy += pdy; }
+                        }
                         float h = bilinear(Pf, gx, gy) * (1.f - blend) + bilinear(Uf, gx, gy) * blend;
                         buf[wpos] = h; buf[wpos + FIR_TAPS] = h;
                         if (++wpos == FIR_TAPS) wpos = 0;
@@ -635,6 +658,16 @@ private:
         uint64_t fpcr; __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
         __asm__ __volatile__("msr fpcr, %0" :: "r"(fpcr | (1ull << 24)));
 #endif
+    }
+
+    struct CurrentSpec { int mode; float omega, vx, vy; };
+    CurrentSpec currentSpec() const {
+        const float c = std::clamp(prm.current.load(), -1.f, 1.f);
+        if (prm.cmode.load() == 1) {
+            const float d = prm.cdir.load(), sp = c * FLOW_MAX;   // cells per step
+            return {1, 0.f, sp * std::cos(d), sp * std::sin(d)};
+        }
+        return {0, omegaFor(c), 0.f, 0.f};
     }
 
     static float omegaFor(float current) {

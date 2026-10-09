@@ -64,10 +64,13 @@ On the pond:
 | Drag a stone off the pond | remove it |
 | Drag the orbit's cross | where you listen |
 | Drag the dot on the orbit's edge | orbit size (turns orange at the wall) |
-| Drag the curl handle around the rim | current strength + direction |
+| Drag the curl handle around the rim | **Swirl** mode: whirlpool strength + direction |
+| Drag the arrow handle | **Flow** mode: direction the water flows; further from the centre = faster |
 
 Pads: **Shape** (x = corners, y = walls bent in ↔ bulging) and **Medium**
 (x = water ↔ syrup, y = absorb ↔ reflect).
+
+**Swirl / Flow** (under the pond) picks the current type.
 
 Knobs: Start, Speed, Key (pond speed follows the note), Freeze, Wander, Width, Detune,
 Drift, Attack, Release, Velocity, Volume. **Randomize** gives fresh stones; **View** turns
@@ -82,3 +85,5 @@ Every control is a Live parameter, so it's saved with your set and can be automa
 - No loops or ping-pong yet (v0.2).
 - 8 voices. When a 9th note comes in, the oldest note fades out over ~15 ms first.
 - CPU (test machine): about 5% of one core per note; an 8-note chord ~36%.
+  Speed x key tracking is capped at 4x (more water steps = more CPU); an 8-note
+  chord at maximum Speed is ~70%.
