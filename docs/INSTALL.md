@@ -1,4 +1,4 @@
-# Pond synth v0.2 — install and first test
+# Pond synth v0.3 — install and first test
 
 For Live 11 with Max 8 on a Mac (Intel or Apple Silicon).
 
@@ -79,11 +79,23 @@ Knobs, colour-coded by section:
 
 | Section | Controls |
 |---|---|
-| **Time** | Start, Speed, Key (pond speed follows the note), Clarity (0% = alive and shimmering, 100% = clean, steady pitch even at high Speed) |
+| **Time** | Speed, Key (pond speed follows the note), Clarity (0% = alive and shimmering, 100% = clean, steady pitch even at high Speed) |
 | **Orbit** | Wander, Width, Detune, Drift |
 | **Freeze** | Freeze holds a moment of the pond's life. While frozen, changing stones, shape, medium or material re-runs the pond to that same moment, so you hear every change. Breathe: 0 = nearly still, up = the water keeps moving around that moment |
 | **Rain** | Rain (how many drops, 0 = off) and Drop (drop size). Rain keeps the pond moving, so notes sustain |
 | **Amp** | Attack, Release, Velocity, Volume |
+
+**Loop** (bottom row): the strip shows how loud the pond is over its first 6 pond-seconds.
+
+| On the strip | Does |
+|---|---|
+| Drag the blue flag (or click an empty spot) | where notes start |
+| Drag a pink bracket | loop start / end |
+| Drag inside the brackets | move the whole loop |
+
+**Off** plays the pond's life once. **Fwd** jumps back to the loop start each time it reaches the end
+(with a short crossfade). **Ping** runs the pond backwards to the loop start and forwards again: the ripples
+really run in reverse. White lines are the notes' playheads (pink = running backwards).
 
 **Randomize** gives fresh stones. **View** turns the moving water display on and off.
 
@@ -93,7 +105,6 @@ Every control is a Live parameter, so it's saved with your set and can be automa
 
 - Pond shape, medium, current, start point and stone changes apply to the **next** notes
   (notes already playing keep their pond).
-- No loops or ping-pong yet (v0.2).
 - 8 voices. When a 9th note comes in, the oldest note fades out over ~15 ms first.
 - CPU (test machine): about 4-5% of one core per note; an 8-note chord ~25%.
   Speed x key tracking is capped at 4x (more water steps = more CPU).

@@ -63,7 +63,6 @@ def valueof(longname, short, ptype, lo, hi, init, unitstyle=1, exponent=1.0, uni
 # name, longname, shortname, type(0 float,1 int,2 enum), min, max, init, unitstyle, exponent, units
 # unitstyle: 0 int, 1 float, 2 time, 4 dB, 5 %, 9 custom
 DIALS = [
-    ("start", "Start", "Start", 0, 0.0, 4.0, 0.0, 9, 1.0, "%.2f s"),
     ("speed", "Pond Speed", "Speed", 0, 0.1, 4.0, 1.0, 9, 2.0, "%.2fx"),
     ("clarity", "Clarity", "Clarity", 0, 0.0, 100.0, 0.0, 5, 1.0, None),
     ("breathe", "Breathe", "Breathe", 0, 0.0, 100.0, 30.0, 5, 1.0, None),
@@ -99,6 +98,9 @@ HIDDEN = [  # set by pond.js / pads.js gestures, stored + automatable in Live
     ("oy", "Orbit Y", "Orbit Y", 0, -1.0, 1.0, -0.1),
     ("osize", "Orbit Size", "Orbit Sz", 0, 0.0, 1.0, 0.4),
     ("nstones", "Stones", "Stones", 1, 1, 4, 3),
+    ("start", "Start", "Start", 0, 0.0, 6.0, 0.0),          # loop strip: flag
+    ("lstart", "Loop Start", "Loop In", 0, 0.0, 6.0, 0.3),  # loop strip: brackets
+    ("lend", "Loop End", "Loop Out", 0, 0.0, 6.0, 1.2),
 ]
 for i, (x, y, h, s, m) in enumerate(STONE_DEF, start=1):
     for key, label, lo, hi, init in (("x", "X", -1.0, 1.0, x), ("y", "Y", -1.0, 1.0, y), ("h", "Height", 0.0, 1.0, h),
@@ -128,6 +130,7 @@ DEV_H = 169
 C = {
     "pond": (0.33, 0.78, 0.81), "time": (0.45, 0.66, 0.95), "freeze": (0.64, 0.86, 0.96),
     "rain": (0.38, 0.80, 0.66), "orbit": (0.71, 0.85, 0.42), "amp": (0.92, 0.53, 0.43),
+    "loop": (0.90, 0.50, 0.74),
 }
 def rgba(c, a=1.0):
     return [c[0], c[1], c[2], a]
@@ -169,34 +172,37 @@ def bus_out(name, src, x, y, init_bang=True, scale=None):
         wire(initb, 0, src, 0)      # (not for toggles: a bang would flip them)
 
 
-# Two rows of 8 slots to the right of the pads, grouped in coloured sections:
-#   row 1:  TIME  Start Speed [Key] Clarity      | ORBIT  Wander Width Detune Drift
-#   row 2:  FREEZE [Freeze] Breathe | RAIN Rain Drop | AMP  Attack Release Velocity Volume
-SLOT, X0 = 46, PADS_X + PADS_W + 10
-ROW_Y = (18, 104)
+# Controls to the right of the pads, packed tight in coloured sections:
+#   row 1:  TIME Speed [Key] Clarity | FREEZE [Freeze] Breathe | RAIN Rain Drop
+#   row 2:  ORBIT Wander Width Detune Drift | AMP Attack Release Velocity Volume
+#   row 3:  LOOP [Off|Fwd|Ping] + the pond-life strip (start flag, loop brackets, playheads)
+X0, CTRL_W, GAP, DIAL_W = PADS_X + PADS_W + 6, 326, 6, 40
+ROW_Y = (13, 75)
 ROWS = [
-    [("time", ["start", "speed", "keytrack", "clarity"]), ("orbit", ["wander", "width", "detune", "drift"])],
-    [("freeze", ["freeze", "breathe"]), ("rain", ["rain", "drop"]), ("amp", ["attack", "release", "velamt", "volume"])],
+    [("time", ["speed", "keytrack", "clarity"]), ("freeze", ["freeze", "breathe"]), ("rain", ["rain", "drop"])],
+    [("orbit", ["wander", "width", "detune", "drift"]), ("amp", ["attack", "release", "velamt", "volume"])],
 ]
-SECTION_TITLE = {"time": "TIME", "orbit": "ORBIT", "freeze": "FREEZE", "rain": "RAIN", "amp": "AMP"}
+SECTION_TITLE = {"time": "TIME", "orbit": "ORBIT", "freeze": "FREEZE", "rain": "RAIN", "amp": "AMP", "loop": "LOOP"}
 pres_pos, section_of, headers = {}, {}, []
 for r, row in enumerate(ROWS):
     nslots = sum(len(names) for _, names in row)
-    gap = (8 * SLOT + 16 - nslots * SLOT) / max(1, len(row) - 1)     # every row ends at the same x
+    slot = (CTRL_W - GAP * (len(row) - 1)) / nslots          # every row spans the same width
     x = X0
     for sec, names in row:
-        headers.append((sec, x, ROW_Y[r] - 14, len(names) * SLOT - 4))
+        headers.append((sec, x, ROW_Y[r] - 11, len(names) * slot - 2))
         for n in names:
-            pres_pos[n] = (x, ROW_Y[r]); section_of[n] = sec
-            x += SLOT
-        x += gap
-DEVICE_W = int(X0 + 8 * SLOT + 16 + 2)
+            pres_pos[n] = (x + (slot - DIAL_W) / 2, ROW_Y[r]); section_of[n] = sec
+            x += slot
+        x += GAP
+LOOP_Y = 125
+headers.append(("loop", X0, LOOP_Y, CTRL_W))
+DEVICE_W = int(X0 + CTRL_W + 4)
 
 for k, (name, longn, short, ptype, lo, hi, init, ustyle, expo, units) in enumerate(DIALS):
     px, py = pres_pos[name]
     col = C[section_of[name]]
     d = box("live.dial", (700 + (k % 5) * 90, 80 + (k // 5) * 90, 44, 48), ins=1, outs=2, outtypes=["", "float"],
-            pres=(px, py, 44, 48), varname=longn, parameter_enable=1,
+            pres=(px, py, DIAL_W, 48), varname=longn, parameter_enable=1,
             activedialcolor=rgba(col), activeneedlecolor=rgba(col),
             saved_attribute_attributes=valueof(longn, short, ptype, lo, hi, init, ustyle, expo, units))
     param_obj[name] = d
@@ -206,7 +212,7 @@ for k, (name, longn, short, ptype, lo, hi, init, ustyle, expo, units) in enumera
 tog_pres = {"display": (70, 152, 40, 15), "cmode": (114, 152, 46, 15)}
 for n in ("keytrack", "freeze"):
     px, py = pres_pos[n]
-    tog_pres[n] = (px + 2, py + 17, 40, 15)
+    tog_pres[n] = (px, py + 17, DIAL_W, 15)
 for k, (name, longn, short, init, off, on) in enumerate(TOGGLES):
     col = C[section_of.get(name, "pond")]
     t = box("live.text", (700 + k * 90, 300, 44, 17), ins=1, outs=2, outtypes=["", ""], pres=tog_pres[name],
@@ -218,10 +224,21 @@ for k, (name, longn, short, init, off, on) in enumerate(TOGGLES):
 
 # section headers: coloured title + a thin rule
 for k, (sec, x, y, w) in enumerate(headers):
-    box("live.comment", (1500, 40 + k * 30, 80, 18), text=SECTION_TITLE[sec], ins=1, outs=0, pres=(x, y - 2, w, 14),
+    box("live.comment", (1500, 40 + k * 30, 80, 18), text=SECTION_TITLE[sec], ins=1, outs=0, pres=(x - 2, y - 2, w, 14),
         textcolor=rgba(C[sec]), fontname="Arial Bold", fontsize=8.5, fontface=1)
-    box("panel", (1600, 40 + k * 30, 80, 2), ins=1, outs=0, pres=(x + 2, y + 11, w - 2, 1),
+    box("panel", (1600, 40 + k * 30, 80, 2), ins=1, outs=0, pres=(x, y + 10, w, 1),
         bgcolor=rgba(C[sec], 0.45), mode=0, border=0, rounded=0)
+
+# loop: mode tab + pond-life strip
+ltab = box("live.tab", (1500, 300, 60, 15), ins=1, outs=3, outtypes=["", "", "float"], pres=(X0, LOOP_Y + 16, 58, 15),
+           num_lines_patching=1, num_lines_presentation=1, varname="Loop Mode", parameter_enable=1,
+           activebgoncolor=rgba(C["loop"]), activetextoncolor=rgba((0.08, 0.09, 0.1)), fontsize=8.5,
+           saved_attribute_attributes=valueof("Loop Mode", "Loop", 2, 0, 2, 0, unitstyle=9, enum=["Off", "Fwd", "Ping"]))
+param_obj["lmode"] = ltab
+bus_out("lmode", ltab, 1500, 330)
+loopui = box("jsui", (600, 260, CTRL_W - 62, 30), ins=2, outs=1, pres=(X0 + 62, LOOP_Y + 13, CTRL_W - 62, 30),
+             filename="loop.js", parameter_enable=0, border=0)
+wire(rbus, 0, loopui, 0); wire(pond, 2, loopui, 1); wire(initb, 0, loopui, 0)
 
 # hidden parameters driven by the pond / pad gestures
 for k, (name, longn, short, ptype, lo, hi, init) in enumerate(HIDDEN):
@@ -236,6 +253,7 @@ hidden_names = [h[0] for h in HIDDEN]
 route_ui = obj("route " + " ".join(hidden_names), (200, 560, 400, 22), ins=2, outs=len(hidden_names) + 1)
 wire(pondui, 0, route_ui, 0)
 wire(padsui, 0, route_ui, 0)
+wire(loopui, 0, route_ui, 0)
 for k, name in enumerate(hidden_names):
     wire(route_ui, k, param_obj[name], 0)
 
@@ -251,12 +269,13 @@ patcher = {
         "default_fontsize": 10.0, "default_fontface": 0, "default_fontname": "Arial Bold",
         "gridonopen": 1, "gridsize": [8.0, 8.0], "gridsnaponopen": 1, "objectsnaponopen": 1,
         "statusbarvisible": 2, "toolbarvisible": 1, "boxanimatetime": 500, "enablehscroll": 1,
-        "enablevscroll": 1, "devicewidth": float(DEVICE_W), "description": "Pond synth v0.2",
+        "enablevscroll": 1, "devicewidth": float(DEVICE_W), "description": "Pond synth v0.3",
         "digest": "", "tags": "", "style": "", "subpatcher_template": "",
         "boxes": boxes, "lines": lines,
         "dependency_cache": [
             {"name": "pond.js", "bootpath": ".", "patcherrelativepath": ".", "type": "TEXT", "implicit": 1},
             {"name": "pads.js", "bootpath": ".", "patcherrelativepath": ".", "type": "TEXT", "implicit": 1},
+            {"name": "loop.js", "bootpath": ".", "patcherrelativepath": ".", "type": "TEXT", "implicit": 1},
             {"name": "pond~.mxo", "type": "iLaX"},
         ],
         "latency": 0, "is_mpe": 0, "minimum_live_version": "", "minimum_max_version": "",
@@ -291,7 +310,7 @@ def main():
     for l in lines:
         s, d = l["patchline"]["source"], l["patchline"]["destination"]
         assert s[0] in ids and d[0] in ids, l
-    print(f"{len(boxes)} boxes, {len(lines)} connections, {len(DIALS) + len(TOGGLES) + len(HIDDEN) + 1} Live parameters, "
+    print(f"{len(boxes)} boxes, {len(lines)} connections, {len(DIALS) + len(TOGGLES) + len(HIDDEN) + 2} Live parameters, "
           f"device {DEVICE_W}x{DEV_H}")
 
 

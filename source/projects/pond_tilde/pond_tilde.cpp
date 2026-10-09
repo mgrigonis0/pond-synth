@@ -44,6 +44,7 @@ typedef struct _pond {
     std::vector<t_atom>* dispAtoms;
     float dispPeak;
     long displayOn;
+    long lastHeads;
 } t_pond;
 
 static t_class* s_pond_class = nullptr;
@@ -62,10 +63,16 @@ static void rebuild_worker(t_pond* x) {
         rb->dirty = false;
         lk.unlock();
         x->eng->rebuild();
+        // then the pond-life curve for the loop strip (a full bake; cancelled by the next change)
+        lk.lock();
+        bool again = rb->dirty || rb->quit;
+        lk.unlock();
+        if (!again) x->eng->computeLife();
     }
 }
 
 static void request_rebuild(t_pond* x) {
+    x->eng->cancelLife = true;
     {
         std::lock_guard<std::mutex> lk(x->rb->m);
         x->rb->dirty = true;
@@ -109,6 +116,7 @@ static void pond_param(t_pond* x, t_symbol* s, long argc, t_atom* argv) {
     else if (!std::strcmp(n, "grain")) p.grain = v;
     else if (!std::strcmp(n, "rain")) p.rain = v;
     else if (!std::strcmp(n, "drop")) p.drop = v;
+    else if (!std::strcmp(n, "lstart")) p.lstart = v;
     else if (!std::strcmp(n, "nstones")) x->eng->setStoneCount((int)std::lround(v));
     else if (set_stone_field(x, n, v)) {}
     else {
@@ -129,6 +137,8 @@ static void pond_param(t_pond* x, t_symbol* s, long argc, t_atom* argv) {
         else if (!std::strcmp(n, "volume")) p.volume = v;
         else if (!std::strcmp(n, "clarity")) p.clarity = v;
         else if (!std::strcmp(n, "breathe")) p.breathe = v;
+        else if (!std::strcmp(n, "lend")) p.lend = v;
+        else if (!std::strcmp(n, "lmode")) p.lmode = std::clamp((int)std::lround(v), 0, 2);
         else if (!std::strcmp(n, "display")) x->displayOn = v != 0.f;
         else { object_error((t_object*)x, "unknown message %s", n); return; }
     }
@@ -166,6 +176,25 @@ static void pond_randomize(t_pond* x) {
 
 // ---------------------------------------------------------------------------
 static void pond_display_tick(t_pond* x) {
+    // pond-life curve (after a rebuild) and the notes' playheads, for the loop strip
+    {
+        float life[pond::LIFE_N];
+        if (x->eng->readLife(life)) {
+            float pk = 1e-9f;
+            for (float v : life) pk = std::max(pk, v);
+            t_atom a[pond::LIFE_N];
+            for (int i = 0; i < pond::LIFE_N; i++) atom_setfloat(a + i, life[i] / pk);
+            outlet_anything(x->infoOut, gensym("life"), pond::LIFE_N, a);
+        }
+        float h[pond::MAX_VOICES];
+        int nh = x->eng->readHeads(h, pond::MAX_VOICES);
+        if (nh || x->lastHeads) {
+            t_atom a[pond::MAX_VOICES];
+            for (int i = 0; i < nh; i++) atom_setfloat(a + i, h[i]);
+            outlet_anything(x->infoOut, gensym("heads"), nh, a);
+        }
+        x->lastHeads = nh;
+    }
     if (x->displayOn) {
         int active = 0;
         std::vector<float>& d = *x->disp;
@@ -227,8 +256,10 @@ static void* pond_new(t_symbol*, long, t_atom*) {
     x->dispAtoms = new std::vector<t_atom>(pond::DISP * pond::DISP);
     x->dispPeak = 1e-3f;
     x->displayOn = 1;
+    x->lastHeads = 0;
     x->rb = new Rebuilder();
     x->rb->th = std::thread(rebuild_worker, x);
+    request_rebuild(x);                             // first pond-life curve
     x->displayClock = clock_new(x, (method)pond_display_tick);
     clock_fdelay(x->displayClock, 100.);
     return x;
@@ -253,7 +284,7 @@ static const char* kParams[] = {
     "corners", "walls", "visc", "refl", "current", "cmode", "cdir", "start", "nstones",
     "speed", "keytrack", "freeze", "ox", "oy", "osize", "wander", "width", "detune", "drift",
     "attack", "release", "velamt", "volume", "clarity", "display",
-    "breathe", "stiff", "grain", "rain", "drop",
+    "breathe", "stiff", "grain", "rain", "drop", "lmode", "lstart", "lend",
     "s1x", "s1y", "s1h", "s1s", "s1m", "s2x", "s2y", "s2h", "s2s", "s2m",
     "s3x", "s3y", "s3h", "s3s", "s3m", "s4x", "s4y", "s4h", "s4s", "s4m",
 };

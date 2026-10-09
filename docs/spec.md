@@ -1,6 +1,6 @@
 # Pond synth — spec (working title)
 
-Max for Live instrument. Status: v0.2.
+Max for Live instrument. Status: v0.3.
 Target: Live 11, Max 8.6.4, Intel Mac (the build also covers Apple Silicon).
 Code: github.com/mgrigonis0/pond-synth
 Last updated: 2026-10-09.
@@ -206,4 +206,12 @@ Second round (same day):
 - **Corners** are whole numbers only.
 - **UI:** the three pads (Shape, Medium, Material) are small and stacked. Knobs are in colour-coded sections: Time, Orbit, Freeze, Rain, Amp. The orbit is drawn in the Orbit colour.
 
-Still open: loops (pond-life strip with start flag, loop brackets, one-shot / forward / back-and-forth). Default sound is dark (mostly harmonics 1–3 at the default orbit): worth a look.
+## 13. v0.3 (2026-10-09): loops
+
+- **Loop strip** (bottom row): the pond's loudness over 0–6 pond-seconds (computed on the worker after each change, cancelled by the next), a start flag (replaces the Start knob), loop brackets, live playheads. Mode tab: Off / Fwd / Ping.
+- **Forward:** 5–40 ms before the loop end a second copy starts from the baked loop-start moment and takes over through a sin² crossfade. Sustains exactly. No clicks measured.
+- **Ping-pong:** the pond really runs backwards. The leapfrog step is time-symmetric, so swapping the two frames reverses every ripple; the current runs reversed too. The even per-step loss is undone exactly (dividing the old frame by it, which is stable). Friction and viscosity stay losses both ways (undoing them is unstable), so the heard level is made up at the output (up to +18 dB), steered onto the first pass. Turnarounds wait for a current boundary and mirror the in-between position, so the read is continuous. Sustains within ±2 dB.
+- **Fixed on the way:** the viscosity term didn't move with the current, so strong swirl + thick medium + plate could blow up. It now recomputes after each current jump. Stress test: 32 extreme combinations × 30 s, loops, freeze toggled, region moved: 0 failures.
+- **Layout:** controls packed tighter (device 658 → 598 px with the loop row added).
+
+Still open: the default sound is dark (mostly harmonics 1–3 at the default orbit): worth a look.
